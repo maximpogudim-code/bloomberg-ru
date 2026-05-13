@@ -1,0 +1,29 @@
+version: "3.9"
+
+# Cloudflare Tunnel mode — no nginx, no exposed ports needed
+# Usage: docker compose -f docker-compose.cloudflare.yml up -d
+
+services:
+  app:
+    build: .
+    env_file: .env
+    volumes:
+      - cache_data:/app/cache_data
+    shm_size: "1gb"
+    restart: unless-stopped
+    # Internal only — cloudflared connects to this
+    expose:
+      - "8080"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - app
+    restart: unless-stopped
+    # Cloudflared connects outbound to Cloudflare's edge — no inbound ports needed
+
+volumes:
+  cache_data:

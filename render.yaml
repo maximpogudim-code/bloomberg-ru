@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: bloomberg-ru
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: TARGET_LANG
+        value: ru
+      - key: BLOOMBERG_BASE
+        value: https://www.bloomberg.com
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+    disk:
+      name: cache
+      mountPath: /app/cache_data
+      sizeGB: 1
