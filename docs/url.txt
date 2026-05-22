@@ -1,1 +1,1 @@
-https://pal-ice-going-embedded.trycloudflare.com
+https://api.trycloudflare.com
