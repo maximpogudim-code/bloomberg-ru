@@ -83,15 +83,26 @@ if not exist ".venv\" (
     )
     echo Установка зависимостей...
     .venv\Scripts\pip install --upgrade pip --quiet
-    .venv\Scripts\pip install -r requirements.txt
-    if %errorlevel% neq 0 (
-        echo ОШИБКА при установке. Попробуйте запустить ещё раз.
+    set INSTALLED=0
+    for /l %%a in (1,1,3) do (
+        if !INSTALLED!==0 (
+            .venv\Scripts\pip install --timeout 120 --retries 10 -r requirements.txt
+            if !errorlevel!==0 (
+                set INSTALLED=1
+            ) else (
+                echo Сбой сети при установке — пробуем ещё раз, попытка %%a из 3...
+                timeout /t 5 /nobreak >nul
+            )
+        )
+    )
+    if %INSTALLED%==0 (
+        echo ОШИБКА при установке. Проверьте интернет и запустите ещё раз.
         pause
         exit /b 1
     )
     echo.
     echo Устанавливаем дополнительные компоненты — если не получится, сайт всё равно заработает...
-    .venv\Scripts\pip install -r requirements-optional.txt
+    .venv\Scripts\pip install --timeout 120 --retries 10 -r requirements-optional.txt
     echo.
     echo Установка завершена!
     echo.

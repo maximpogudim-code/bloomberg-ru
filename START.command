@@ -61,16 +61,26 @@ if [ ! -d ".venv" ]; then
     fi
     echo "Установка зависимостей..."
     .venv/bin/pip install --upgrade pip --quiet
-    .venv/bin/pip install -r requirements.txt
-    if [ $? -ne 0 ]; then
-        echo "ОШИБКА при установке. Попробуйте запустить ещё раз."
+    # Медленный интернет — не приговор: большой таймаут и до 3 попыток
+    INSTALLED=0
+    for ATTEMPT in 1 2 3; do
+        if .venv/bin/pip install --timeout 120 --retries 10 -r requirements.txt; then
+            INSTALLED=1
+            break
+        fi
+        echo ""
+        echo "Сбой сети при установке — пробуем ещё раз ($ATTEMPT из 3)..."
+        sleep 5
+    done
+    if [ $INSTALLED -ne 1 ]; then
+        echo "ОШИБКА при установке. Проверьте интернет и запустите ещё раз."
         read -p "Нажмите Enter, чтобы закрыть..."
         exit 1
     fi
     echo ""
     echo "Устанавливаем дополнительные компоненты (ТВ-озвучка, полные статьи)..."
     echo "(Если эта часть не установится — сайт всё равно будет работать)"
-    .venv/bin/pip install -r requirements-optional.txt || true
+    .venv/bin/pip install --timeout 120 --retries 10 -r requirements-optional.txt || true
     echo ""
     echo "Установка завершена!"
 fi
