@@ -652,8 +652,11 @@ async def live_transcript():
     _dub_subscribers.append(queue)
 
     if _dub_task is None or _dub_task.done():
-        from live_audio import live_dubbing_loop
-        _dub_task = asyncio.create_task(live_dubbing_loop(vid, _dub_callback))
+        try:
+            from live_audio import live_dubbing_loop
+            _dub_task = asyncio.create_task(live_dubbing_loop(vid, _dub_callback))
+        except Exception:
+            _dub_task = None
 
     async def event_stream():
         try:

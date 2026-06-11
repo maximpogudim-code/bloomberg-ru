@@ -7,3 +7,7 @@ __pycache__/
 nohup.out
 cloudflared
 *.db
+_backups/
+.DS_Store
+*.zip
+tests/__pycache__/

@@ -42,7 +42,10 @@ def _whisper_cache_dir() -> str:
 def _get_model():
     global _MODEL
     if _MODEL is None:
-        from faster_whisper import WhisperModel
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise RuntimeError("faster-whisper is not installed; live transcription unavailable") from exc
         _MODEL = WhisperModel(
             "tiny", device="cpu", compute_type="int8",
             download_root=_whisper_cache_dir(),
@@ -127,7 +130,15 @@ async def live_dubbing_loop(video_id: str, callback) -> None:
     """
     Continuously: get HLS URL → capture 10s WAV → transcribe EN → translate RU → callback(ru_text).
     Runs until cancelled. `callback` is an async function receiving a single str.
+    Gracefully degrades if faster-whisper, yt-dlp or ffmpeg are unavailable.
     """
+    # Pre-check: faster-whisper must be importable
+    try:
+        from faster_whisper import WhisperModel  # noqa: F401
+    except ImportError:
+        # No faster-whisper — silently do nothing (live transcription unavailable)
+        return
+
     loop = asyncio.get_event_loop()
     consecutive_failures = 0
 

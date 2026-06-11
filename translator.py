@@ -148,7 +148,19 @@ async def translate_batch(nodes: list[dict], target_lang: str = "ru") -> dict[st
     """Translate a batch of {id, text} nodes → {id: translated} dict."""
     if not nodes:
         return {}
-    for fn in (_translate_batch_claude, _translate_batch_groq, _translate_batch_google, _translate_batch_ollama):
+
+    # Build the fallback chain, skipping LLM providers whose keys are missing
+    chain = []
+    if os.getenv("ANTHROPIC_API_KEY"):
+        chain.append(_translate_batch_claude)
+    if os.getenv("GROQ_API_KEY"):
+        chain.append(_translate_batch_groq)
+    # Google Translate (free, no key required) is always available
+    chain.append(_translate_batch_google)
+    # Ollama is optional and local — keep as last resort
+    chain.append(_translate_batch_ollama)
+
+    for fn in chain:
         try:
             result = await fn(nodes, target_lang)
             if result:

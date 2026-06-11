@@ -13,6 +13,7 @@ def _get_cache():
     if _cache is None:
         import diskcache
         cache_dir = os.getenv("CACHE_DIR", "./cache_data")
+        os.makedirs(cache_dir, exist_ok=True)
         _cache = diskcache.Cache(cache_dir, size_limit=2 ** 30)  # 1 GB max
     return _cache
 

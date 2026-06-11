@@ -11,3 +11,4 @@ yfinance==0.2.51
 deep-translator==1.11.4
 faster-whisper==1.2.1
 yt-dlp==2026.3.17
+playwright>=1.40.0

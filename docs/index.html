@@ -3,35 +3,233 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Bloomberg RU — Перенаправление...</title>
-<meta http-equiv="refresh" content="2;url=https://nissan-low-availability-asian.trycloudflare.com">
+<title>Bloomberg Terminal на русском</title>
 <style>
-  body { font-family: Arial, sans-serif; background: #1a1a2e; color: #fff; 
-         display: flex; align-items: center; justify-content: center; 
-         min-height: 100vh; margin: 0; text-align: center; }
-  .box { background: #16213e; padding: 40px; border-radius: 12px; max-width: 500px; }
-  h1 { color: #e6a817; margin-bottom: 10px; }
-  p { color: #aaa; margin: 10px 0; }
-  .url { color: #4fc3f7; font-size: 13px; word-break: break-all; }
-  .spinner { width: 40px; height: 40px; border: 4px solid #333; 
-             border-top: 4px solid #e6a817; border-radius: 50%; 
-             animation: spin 1s linear infinite; margin: 20px auto; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  a { color: #4fc3f7; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    min-height: 100vh;
+    padding: 40px 20px 60px;
+  }
+
+  .container {
+    max-width: 760px;
+    margin: 0 auto;
+  }
+
+  .hero {
+    text-align: center;
+    padding: 48px 0 40px;
+    border-bottom: 1px solid #21262d;
+    margin-bottom: 40px;
+  }
+
+  .hero h1 {
+    font-size: clamp(1.8rem, 5vw, 2.6rem);
+    font-weight: 700;
+    color: #e6a817;
+    margin-bottom: 16px;
+    letter-spacing: -0.5px;
+  }
+
+  .hero p {
+    font-size: 1.1rem;
+    color: #8b949e;
+    max-width: 540px;
+    margin: 0 auto 32px;
+    line-height: 1.6;
+  }
+
+  .btn-download {
+    display: inline-block;
+    background: #e6a817;
+    color: #0d1117;
+    font-size: 1.05rem;
+    font-weight: 700;
+    padding: 14px 32px;
+    border-radius: 8px;
+    text-decoration: none;
+    transition: background 0.15s, transform 0.1s;
+  }
+
+  .btn-download:hover {
+    background: #f0b932;
+    transform: translateY(-1px);
+  }
+
+  .badge {
+    display: inline-block;
+    background: #161b22;
+    border: 1px solid #30363d;
+    color: #8b949e;
+    font-size: 0.8rem;
+    padding: 4px 12px;
+    border-radius: 20px;
+    margin-top: 16px;
+  }
+
+  .section {
+    margin-bottom: 36px;
+  }
+
+  .section h2 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #f0f6fc;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #21262d;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .section h2 .os-icon {
+    font-size: 1.3rem;
+  }
+
+  ol {
+    padding-left: 20px;
+  }
+
+  ol li {
+    color: #c9d1d9;
+    line-height: 1.7;
+    margin-bottom: 8px;
+    font-size: 0.97rem;
+  }
+
+  ol li strong {
+    color: #f0f6fc;
+  }
+
+  .highlight {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-left: 3px solid #e6a817;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-top: 12px;
+    font-size: 0.9rem;
+    color: #8b949e;
+    line-height: 1.6;
+  }
+
+  code {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 0.88em;
+    color: #79c0ff;
+  }
+
+  .footer {
+    margin-top: 60px;
+    padding-top: 24px;
+    border-top: 1px solid #21262d;
+    text-align: center;
+    font-size: 0.85rem;
+    color: #484f58;
+  }
+
+  .footer a {
+    color: #58a6ff;
+    text-decoration: none;
+  }
+
+  .footer a:hover {
+    text-decoration: underline;
+  }
 </style>
 </head>
 <body>
-<div class="box">
-  <h1>📺 Bloomberg RU</h1>
-  <div class="spinner"></div>
-  <p>Переход на Bloomberg с русским переводом...</p>
-  <p class="url"><a href="https://nissan-low-availability-asian.trycloudflare.com</a></p>
-  <script>
-    fetch('url.txt?t=' + Date.now())
-      .then(r => r.text())
-      .then(url => { url = url.trim(); if(url) window.location.href = url; })
-      .catch(() => window.location.href = 'https://nissan-low-availability-asian.trycloudflare.com');
-  </script>
+<div class="container">
+
+  <div class="hero">
+    <h1>Bloomberg Terminal на русском</h1>
+    <p>Финансовые новости и котировки Bloomberg с автоматическим переводом на русский язык. Работает на вашем компьютере, бесплатно.</p>
+    <a class="btn-download" href="https://github.com/maximpogudim-code/bloomberg-ru/archive/refs/heads/main.zip">
+      Скачать (ZIP)
+    </a>
+    <br>
+    <span class="badge">Версия для Windows и Mac</span>
+  </div>
+
+  <!-- Windows -->
+  <div class="section">
+    <h2><span class="os-icon">&#x1F4BB;</span> Запуск на Windows</h2>
+    <ol>
+      <li>
+        <strong>Установите Python</strong> (один раз): зайдите на
+        <a href="https://python.org/downloads" style="color:#58a6ff;">python.org/downloads</a>,
+        скачайте и запустите установщик.
+        <strong>Обязательно поставьте галочку «Add Python to PATH»</strong>.
+      </li>
+      <li>
+        Нажмите кнопку <strong>«Скачать (ZIP)»</strong> выше, распакуйте архив
+        в удобную папку (правый клик → «Извлечь все»).
+      </li>
+      <li>
+        Откройте распакованную папку, дважды щёлкните <strong>START.bat</strong>.
+      </li>
+      <li>
+        При первом запуске программа установит компоненты — это займёт
+        <strong>5–10 минут</strong>. Потом автоматически откроется браузер.
+      </li>
+    </ol>
+    <div class="highlight">
+      Если Windows предупреждает о запуске — нажмите «Подробнее» → «Выполнить в любом случае».
+    </div>
+  </div>
+
+  <!-- Mac -->
+  <div class="section">
+    <h2><span class="os-icon">&#x1F34E;</span> Запуск на Mac</h2>
+    <ol>
+      <li>
+        Нажмите кнопку <strong>«Скачать (ZIP)»</strong> выше, распакуйте архив
+        (двойной клик на ZIP-файл).
+      </li>
+      <li>
+        Откройте распакованную папку, дважды щёлкните <strong>START.command</strong>.
+      </li>
+      <li>
+        Если macOS блокирует файл: <strong>правый клик</strong> на START.command
+        → <strong>Открыть</strong> → в диалоге нажмите <strong>Открыть</strong>.
+      </li>
+      <li>
+        Откроется окно с текстом. При первом запуске подождите <strong>5–10 минут</strong>.
+        Потом автоматически откроется браузер.
+      </li>
+    </ol>
+    <div class="highlight">
+      Не закрывайте появившееся чёрное окно — оно держит программу запущенной.
+      Чтобы выключить, просто закройте его.
+    </div>
+  </div>
+
+  <!-- Troubleshooting -->
+  <div class="section">
+    <h2>Если что-то не работает</h2>
+    <ol>
+      <li><strong>Браузер не открылся</strong> — введите вручную в адресной строке: <code>http://localhost:8080</code></li>
+      <li><strong>«Python не найден» на Windows</strong> — при установке Python не была поставлена галочка «Add Python to PATH». Переустановите Python с этой галочкой.</li>
+      <li><strong>«Не удаётся открыть» на Mac</strong> — сделайте правый клик → Открыть вместо двойного клика.</li>
+      <li><strong>Новости не переводятся</strong> — проверьте подключение к интернету и перезапустите START.command / START.bat.</li>
+    </ol>
+  </div>
+
+  <div class="footer">
+    <a href="https://github.com/maximpogudim-code/bloomberg-ru">Исходный код на GitHub</a>
+    &nbsp;&middot;&nbsp;
+    Программа запускается локально на вашем компьютере
+  </div>
+
 </div>
 </body>
 </html>

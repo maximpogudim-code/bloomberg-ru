@@ -41,7 +41,10 @@ def _is_paywalled(html: str) -> bool:
 
 async def _fetch_url_playwright(url: str, wait: float = 2.0) -> str | None:
     """Fetch any URL via Playwright headless Chromium."""
-    from playwright.async_api import async_playwright
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return None
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -101,7 +104,12 @@ def _load_cookies() -> list[dict]:
 
 
 async def _fetch_with_playwright(url: str) -> str:
-    from playwright.async_api import async_playwright
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        raise RuntimeError(
+            "playwright is not installed; run: pip install playwright && playwright install chromium"
+        )
 
     cookies = _load_cookies()
     has_cookies = bool(cookies)
