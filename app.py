@@ -918,6 +918,16 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
 .cs-lbl{{font-size:8px;font-weight:800;color:var(--muted);letter-spacing:.6px;text-transform:uppercase}}
 .cs-val{{font-size:11px;font-weight:700;font-family:var(--mono);color:var(--text)}}
 #chart-container{{min-height:440px;flex:1}}
+.calc-panel{{border-top:1px solid var(--bd);background:rgba(245,158,11,.03);padding:10px 12px}}
+.calc-title{{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--amber);margin-bottom:8px}}
+.calc-row{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+.calc-row select,.calc-row input{{background:var(--bg);border:1px solid var(--bd);border-radius:5px;color:var(--text);font-size:13px;padding:6px 9px;font-family:var(--mono);outline:none}}
+.calc-row select:hover,.calc-row input:focus{{border-color:var(--amber)}}
+.calc-row input{{width:110px}}
+.calc-eq{{color:var(--muted);font-size:14px}}
+.calc-res{{font-family:var(--mono);font-size:16px;font-weight:700;color:var(--amber)}}
+.calc-res-rub{{font-family:var(--mono);font-size:13px;color:var(--muted)}}
+.calc-note{{font-size:10px;color:var(--muted);margin-top:6px}}
 
 /* MARKETS PANEL */
 .mkt-panel{{background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}}
@@ -1134,6 +1144,27 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
     </div>
     <div class="chart-stats" id="chart-stats"></div>
     <div id="chart-container" style="min-height:440px;flex:1"></div>
+    <div class="calc-panel">
+      <div class="calc-title">Калькулятор драгметаллов · live</div>
+      <div class="calc-row">
+        <input type="number" id="calc-amount" value="1" min="0" step="any" oninput="calcUpdate()">
+        <select id="calc-unit" onchange="calcUpdate()">
+          <option value="oz">тройских унций</option>
+          <option value="g">граммов</option>
+          <option value="kg">килограммов</option>
+        </select>
+        <select id="calc-metal" onchange="calcUpdate()">
+          <option value="GC=F">золота</option>
+          <option value="SI=F">серебра</option>
+          <option value="PL=F">платины</option>
+          <option value="PA=F">палладия</option>
+        </select>
+        <span class="calc-eq">=</span>
+        <span class="calc-res" id="calc-res">—</span>
+        <span class="calc-res-rub" id="calc-res-rub"></span>
+      </div>
+      <div class="calc-note" id="calc-note">Загрузка цен...</div>
+    </div>
   </div>
 
   <!-- RIGHT: Market Data -->
@@ -1524,6 +1555,38 @@ function refreshMetalCharts(){{
       }}).catch(function(){{}});
   }});
 }}
+// METALS CALCULATOR — пересчёт унции/граммы/кг по живым ценам
+var _OZ_G=31.1034768;
+var _calcPrices={{}};var _usdRub=null;
+var _CALC_NAMES={{'GC=F':'золото','SI=F':'серебро','PL=F':'платина','PA=F':'палладий'}};
+function refreshCalcPrices(){{
+  ['GC=F','SI=F','PL=F','PA=F'].forEach(function(s){{
+    fetch('/api/quote?symbol='+encodeURIComponent(s)).then(r=>r.json()).then(function(q){{
+      if(q&&q.price!=null){{_calcPrices[s]=q.price;calcUpdate();}}
+    }}).catch(function(){{}});
+  }});
+  fetch('/api/quote?symbol=RUB%3DX').then(r=>r.json()).then(function(q){{
+    if(q&&q.price!=null){{_usdRub=q.price;calcUpdate();}}
+  }}).catch(function(){{}});
+}}
+function calcUpdate(){{
+  var amt=parseFloat(document.getElementById('calc-amount').value);
+  var unit=document.getElementById('calc-unit').value;
+  var sym=document.getElementById('calc-metal').value;
+  var p=_calcPrices[sym];
+  var res=document.getElementById('calc-res'),rub=document.getElementById('calc-res-rub'),note=document.getElementById('calc-note');
+  if(!p||isNaN(amt)){{res.textContent='—';rub.textContent='';return;}}
+  var oz=unit==='oz'?amt:(unit==='g'?amt/_OZ_G:amt*1000/_OZ_G);
+  var usd=oz*p;
+  res.textContent='$'+usd.toLocaleString('ru-RU',{{maximumFractionDigits:2}});
+  rub.textContent=_usdRub?('≈ '+(usd*_usdRub).toLocaleString('ru-RU',{{maximumFractionDigits:0}})+' ₽'):'';
+  var perG=p/_OZ_G;
+  note.textContent=_CALC_NAMES[sym]+': $'+p.toFixed(2)+'/унция · $'+perG.toFixed(2)+'/грамм · $'
+    +(perG*1000).toLocaleString('ru-RU',{{maximumFractionDigits:0}})+'/кг'
+    +(_usdRub?(' · курс $1 = '+_usdRub.toFixed(2)+' ₽'):'');
+}}
+refreshCalcPrices();setInterval(refreshCalcPrices,60000);
+
 function refreshMetalQuotes(){{
   Object.keys(_metals).forEach(function(k){{
     var m=_metals[k];
