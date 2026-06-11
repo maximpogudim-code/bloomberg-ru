@@ -264,6 +264,132 @@ async def api_market_history(symbol: str, period: str = "1mo"):
     return JSONResponse(result)
 
 
+_QUOTE_CACHE: dict = {}
+_QUOTE_TTL = 30
+
+@app.get("/api/quote")
+async def api_quote(symbol: str = "SPY"):
+    """Сводка по тикеру: дн. диапазон, 52-нед макс/мин, объём, капитализация."""
+    import time, math
+    now = time.time()
+    hit = _QUOTE_CACHE.get(symbol)
+    if hit and hit[1] + _QUOTE_TTL > now:
+        return JSONResponse(hit[0])
+
+    def _num(x):
+        try:
+            x = float(x)
+            return None if (math.isnan(x) or math.isinf(x)) else x
+        except Exception:
+            return None
+
+    def _fetch():
+        import yfinance as yf
+        fi = yf.Ticker(symbol).fast_info
+        return {
+            "symbol": symbol,
+            "price": _num(getattr(fi, "last_price", None)),
+            "prev": _num(getattr(fi, "previous_close", None)),
+            "day_high": _num(getattr(fi, "day_high", None)),
+            "day_low": _num(getattr(fi, "day_low", None)),
+            "year_high": _num(getattr(fi, "year_high", None)),
+            "year_low": _num(getattr(fi, "year_low", None)),
+            "volume": _num(getattr(fi, "last_volume", None)),
+            "market_cap": _num(getattr(fi, "market_cap", None)),
+            "currency": getattr(fi, "currency", None) or "USD",
+        }
+
+    loop = asyncio.get_event_loop()
+    try:
+        data = await loop.run_in_executor(None, _fetch)
+        if data and data.get("price"):
+            _QUOTE_CACHE[symbol] = (data, now)
+        return JSONResponse(data)
+    except Exception as e:
+        if hit:
+            return JSONResponse(hit[0])
+        return JSONResponse({"symbol": symbol, "error": str(e)})
+
+
+_OHLCV_CACHE: dict = {}
+_OHLCV_TTL = 60  # свечи кэшируем 60с: одни и те же графики просят многие зрители
+
+@app.get("/api/ohlcv")
+async def api_ohlcv(symbol: str = "SPY", period: str = "1mo", interval: str = "1d"):
+    import time
+    allowed_p = {"1d","5d","1mo","3mo","6mo","1y","5y","max"}
+    allowed_i = {"1m","2m","5m","15m","30m","60m","1h","1d","1wk","1mo"}
+    if period not in allowed_p: period = "1mo"
+    if interval not in allowed_i: interval = "1d"
+
+    ckey = f"{symbol}|{period}|{interval}"
+    now = time.time()
+    hit = _OHLCV_CACHE.get(ckey)
+    if hit and hit[1] + _OHLCV_TTL > now:
+        return JSONResponse(hit[0])
+
+    def _fetch():
+        import yfinance as yf, math
+        hist = yf.Ticker(symbol).history(period=period, interval=interval)
+        if hist.empty:
+            return []
+        out = []
+        for dt, row in hist.iterrows():
+            t = dt.strftime("%Y-%m-%d") if interval in ("1d","1wk","1mo") else int(dt.timestamp())
+            o,h,l,c = float(row["Open"]),float(row["High"]),float(row["Low"]),float(row["Close"])
+            if any(math.isnan(x) or math.isinf(x) for x in [o,h,l,c]):
+                continue
+            try:
+                v = float(row["Volume"])
+                v = 0 if math.isnan(v) or math.isinf(v) else int(v)
+            except Exception:
+                v = 0
+            out.append({"time":t,"open":round(o,4),"high":round(h,4),"low":round(l,4),"close":round(c,4),"volume":v})
+        return out
+
+    loop = asyncio.get_event_loop()
+    try:
+        data = await loop.run_in_executor(None, _fetch)
+        if data:
+            _OHLCV_CACHE[ckey] = (data, now)
+        return JSONResponse(data)
+    except Exception as e:
+        if hit:  # отдаём устаревшие свечи при сбое
+            return JSONResponse(hit[0])
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/ai-brief")
+async def api_ai_brief():
+    from dashboard import get_market_data
+    market = await get_market_data()
+
+    def _call():
+        import groq
+        key = os.getenv("GROQ_API_KEY")
+        if not key:
+            return "Настройте GROQ_API_KEY для AI-анализа."
+        summary = "\n".join(
+            f"{m['name']}: {m['price']} ({'+'if m['change']>=0 else ''}{m['change']}%)"
+            for m in market[:16]
+        )
+        msg = groq.Groq(api_key=key).chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            max_tokens=280,
+            messages=[{"role":"user","content":
+                f"Дай краткий профессиональный анализ текущей рыночной ситуации в 3-4 предложениях на русском языке.\n"
+                f"Данные:\n{summary}\n"
+                f"Пиши как Bloomberg-аналитик: конкретно, без воды, с акцентом на ключевые движущие факторы. Без заголовков."}]
+        )
+        return msg.choices[0].message.content
+
+    loop = asyncio.get_event_loop()
+    try:
+        return JSONResponse({"brief": await loop.run_in_executor(None, _call)})
+    except Exception:
+        return JSONResponse({"brief": "AI-анализ временно недоступен"})
+
+
 @app.get("/api/news")
 async def api_news():
     from dashboard import get_translated_news
@@ -304,14 +430,18 @@ async def api_live_id():
 
 
 _HLS_CACHE: dict = {}
+# Кэш проксированных плейлистов: ключ=src → (текст, ts). Живой HLS обновляется ~5с,
+# поэтому 2с кэша достаточно и снимает нагрузку с googlevideo при множестве зрителей.
+_PL_CACHE: dict = {}
+_PL_TTL = 2.0
+_PL_LOCKS: dict = {}
 
-@app.get("/api/live-hls")
-async def api_live_hls():
-    """Return raw HLS .m3u8 URL for Bloomberg TV — used by hls.js player and audio capture."""
+async def _get_upstream_hls() -> str:
+    """Resolve the googlevideo HLS manifest URL for Bloomberg TV (cached 30 min)."""
     import time
     now = time.time()
     if _HLS_CACHE.get("ts", 0) + 1800 > now and _HLS_CACHE.get("url"):
-        return JSONResponse({"url": _HLS_CACHE["url"]})
+        return _HLS_CACHE["url"]
 
     vid = _LIVE_ID_CACHE.get("id", "iEpJwprxDdk")
 
@@ -334,7 +464,124 @@ async def api_live_hls():
     if url:
         _HLS_CACHE["url"] = url
         _HLS_CACHE["ts"] = now
-    return JSONResponse({"url": url or _HLS_CACHE.get("url", "")})
+    return url or _HLS_CACHE.get("url", "")
+
+
+@app.get("/api/live-hls")
+async def api_live_hls():
+    """Return a SAME-ORIGIN proxied HLS URL so hls.js can play it (googlevideo lacks CORS)."""
+    upstream = await _get_upstream_hls()
+    if not upstream:
+        return JSONResponse({"url": ""})
+    # Point the browser at our proxy, which adds CORS and fetches from the server IP.
+    return JSONResponse({"url": "/api/hls/index.m3u8"})
+
+
+def _b64u(s: str) -> str:
+    import base64
+    return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
+
+
+def _unb64u(s: str) -> str:
+    import base64
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad).decode()
+
+
+def _rewrite_playlist(text: str, upstream: str) -> str:
+    """Перепишем URL сегментов/вложенных плейлистов через наш прокси."""
+    from urllib.parse import urljoin
+    out_lines = []
+    prev_tag = ""
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            out_lines.append(line)
+            continue
+        if s.startswith("#"):
+            out_lines.append(line)
+            prev_tag = s
+            continue
+        abs_url = urljoin(upstream, s)
+        if "STREAM-INF" in prev_tag or abs_url.rstrip().endswith(".m3u8"):
+            out_lines.append(f"/api/hls/index.m3u8?src={_b64u(abs_url)}")
+        else:
+            out_lines.append(f"/api/hls/seg?u={_b64u(abs_url)}")
+        prev_tag = ""
+    return "\n".join(out_lines) + "\n"
+
+
+@app.get("/api/hls/index.m3u8")
+async def api_hls_playlist(src: str = ""):
+    """Прокси HLS-плейлиста с коротким кэшем, ретраями и stale-fallback (CORS добавляем сами)."""
+    import httpx, time
+
+    upstream = _unb64u(src) if src else await _get_upstream_hls()
+    if not upstream:
+        return JSONResponse({"error": "no stream"}, status_code=503)
+
+    key = src or "_root"
+    now = time.time()
+    cached = _PL_CACHE.get(key)
+    if cached and cached[1] + _PL_TTL > now:
+        return StreamingResponse(
+            iter([cached[0].encode()]),
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
+        )
+
+    # один апстрим-фетч на ключ за раз — остальные конкурентные запросы ждут лок и берут кэш
+    lock = _PL_LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
+        cached = _PL_CACHE.get(key)
+        if cached and cached[1] + _PL_TTL > time.time():
+            body = cached[0]
+        else:
+            body = None
+            last_err = ""
+            for attempt in range(3):
+                try:
+                    async with httpx.AsyncClient(timeout=12, follow_redirects=True) as c:
+                        r = await c.get(upstream, headers={"User-Agent": "Mozilla/5.0"})
+                        if r.status_code == 200 and r.text.startswith("#EXTM3U"):
+                            body = _rewrite_playlist(r.text, upstream)
+                            _PL_CACHE[key] = (body, time.time())
+                            break
+                        last_err = f"upstream status {r.status_code}"
+                except Exception as e:
+                    last_err = f"{type(e).__name__}: {e}"
+                await asyncio.sleep(0.3 * (attempt + 1))
+            if body is None:
+                # отдаём устаревший плейлист, если есть, чтобы плеер не падал
+                if cached:
+                    body = cached[0]
+                else:
+                    return JSONResponse({"error": last_err or "upstream failed"}, status_code=502)
+
+    return StreamingResponse(
+        iter([body.encode()]),
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
+    )
+
+
+@app.get("/api/hls/seg")
+async def api_hls_segment(u: str):
+    """Proxy a single HLS media segment from googlevideo (server IP matches the URL's IP lock)."""
+    import httpx
+    seg_url = _unb64u(u)
+
+    async def _stream():
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
+            async with c.stream("GET", seg_url, headers={"User-Agent": "Mozilla/5.0"}) as r:
+                async for chunk in r.aiter_bytes(65536):
+                    yield chunk
+
+    return StreamingResponse(
+        _stream(),
+        media_type="video/mp2t",
+        headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
+    )
 
 
 @app.get("/api/translate-text")
@@ -465,7 +712,7 @@ async def proxy_handler(
 
 
 def _market_color(change: float) -> str:
-    return "#22c55e" if change >= 0 else "#ef4444"
+    return "#22d47a" if change >= 0 else "#ff4466"
 
 
 def _render_ticker_items(market: list) -> str:
@@ -515,548 +762,839 @@ _LIVE_WIDGET = """
 </div>"""
 
 
+
+
 def _render_news_html(news: list) -> str:
     cats = {}
     for a in news:
         cats.setdefault(a["cat"], []).append(a)
-
-    news_html = ""
-    for i, (cat, articles) in enumerate(cats.items()):
-        # Insert live widget after first news section
-        if i == 1:
-            news_html += _LIVE_WIDGET
-        news_html += f'<div class="section-title"><span class="st-line"></span>{cat}<span class="st-line"></span></div><div class="news-grid">'
+    html = ""
+    for cat, articles in cats.items():
+        html += f'<div class="nc-group">{cat}</div><div class="nc-grid">'
         for a in articles[:6]:
             title = a.get("title_ru") or a["title"]
-            desc = a.get("desc_ru") or a.get("desc", "")
+            desc = (a.get("desc_ru") or a.get("desc", ""))[:130]
             link = a.get("link", "#")
             img = a.get("img", "")
-            img_html = f'<div class="card-img" style="background-image:url({img})"></div>' if img else '<div class="card-img card-img-placeholder"></div>'
-            news_html += (
-                f'<a class="card" href="{link}" target="_blank">'
-                f'{img_html}'
-                f'<div class="card-body">'
-                f'<div class="cat-label">{cat}</div>'
-                f'<div class="card-title">{title}</div>'
-                f'{"<div class=card-desc>" + desc + "</div>" if desc else ""}'
-                f'</div>'
-                f'</a>'
+            img_html = (
+                f'<div class="nc-img" style="background-image:url({img})"></div>'
+                if img else '<div class="nc-img nc-img-ph"></div>'
             )
-        news_html += '</div>'
-
-    if not news_html:
-        news_html = '<div style="color:#475569;text-align:center;padding:40px">Загрузка новостей...</div>'
-    return news_html
-
-
-def _sw(label: str, key: str, symbol: str) -> str:
-    """Generate one sidebar widget HTML."""
-    return (
-        f'<div class="swidget">'
-        f'<div class="sw-header"><div class="sw-label">{label}</div>'
-        f'<div class="sw-periods">'
-        f'<button class="sw-period active" onclick="loadHist(this,\'{symbol}\',\'1wk\',\'sw-{key}-hist\')">1Н</button>'
-        f'<button class="sw-period" onclick="loadHist(this,\'{symbol}\',\'1mo\',\'sw-{key}-hist\')">1М</button>'
-        f'<button class="sw-period" onclick="loadHist(this,\'{symbol}\',\'1y\',\'sw-{key}-hist\')">1Г</button>'
-        f'</div></div>'
-        f'<div class="sw-price" id="sw-{key}-price">—</div>'
-        f'<div class="sw-change" id="sw-{key}-ch">'
-        f'<span class="sw-arrow" id="sw-{key}-arr"></span>'
-        f'<span id="sw-{key}-pct"></span>'
-        f'&nbsp;<span style="color:var(--muted);font-weight:400">сегодня</span></div>'
-        f'<div class="sw-hist" id="sw-{key}-hist"></div>'
-        f'<div class="sw-bar-wrap"><div class="sw-bar" id="sw-{key}-bar" style="width:50%"></div></div>'
-        f'</div>'
-    )
+            html += (
+                f'<a class="nc" href="{link}" target="_blank" rel="noopener">'
+                f'{img_html}'
+                f'<div class="nc-body">'
+                f'<div class="nc-cat">{cat}</div>'
+                f'<div class="nc-title">{title}</div>'
+                f'{"<div class=nc-desc>" + desc + "</div>" if desc else ""}'
+                f'</div></a>'
+            )
+        html += '</div>'
+    return html or '<div class="nc-empty">Загрузка новостей...</div>'
 
 
 def _render_dashboard(market: list, news: list) -> str:
     ticker_items = _render_ticker_items(market)
     news_html = _render_news_html(news)
-    sidebar_left = (
-        _sw('Золото',   'gold',     'GC=F')
-        + _sw('Серебро', 'silver',   'SI=F')
-        + _sw('Платина', 'platinum', 'PL=F')
-        + _sw('Палладий','palladium','PA=F')
-    )
-    sidebar_right = (
-        _sw('Нефть WTI','oil',   'CL=F')
-        + _sw('Прир. газ','gas',  'NG=F')
-        + _sw('Bitcoin', 'btc',   'BTC-USD')
-        + _sw('Ethereum','eth',   'ETH-USD')
-    )
 
     return f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Bloomberg RU — Финансовые новости</title>
+<title>Bloomberg Terminal · RU</title>
 <style>
-:root{{--bg:#07090f;--surface:#0d1117;--surface2:#111827;--border:#1c2537;--accent:#2563eb;--accent2:#3b82f6;--text:#f1f5f9;--muted:#64748b;--green:#22c55e;--red:#ef4444}}
+:root{{
+  --bg:#060c18;--sf:#0c1624;--sf2:#111e33;--bd:#1a2840;
+  --amber:#f59e0b;--amber2:#fbbf24;
+  --green:#22d47a;--red:#ff4466;
+  --text:#dde6f0;--muted:#4a6080;--dim:#1a2840;
+  --mono:'SF Mono','Courier New',monospace;
+}}
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;min-height:100vh}}
+html,body{{height:100%}}
+body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;overflow-x:hidden}}
 
-/* ── Header ── */
-.header{{background:rgba(7,9,15,.95);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:0 20px;display:flex;align-items:center;gap:16px;height:52px;position:sticky;top:0;z-index:200}}
-.logo{{font-size:17px;font-weight:900;letter-spacing:-.5px;white-space:nowrap;display:flex;align-items:center;gap:6px}}
-.logo-b{{color:#fff}}.logo-ru{{background:var(--accent);color:#fff;padding:1px 6px;border-radius:4px;font-size:13px;font-weight:800;letter-spacing:.5px}}
-.header-right{{margin-left:auto;display:flex;align-items:center;gap:12px}}
-.live-badge{{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:var(--green);letter-spacing:.5px;text-transform:uppercase}}
-.live-dot{{width:6px;height:6px;background:var(--green);border-radius:50%;animation:pulse 2s ease-in-out infinite;flex-shrink:0}}
-@keyframes pulse{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:.4;transform:scale(.8)}}}}
-.htime{{font-size:11px;color:var(--muted)}}
+/* HEADER */
+.hdr{{background:#030810;border-bottom:2px solid var(--amber);display:flex;align-items:center;gap:12px;padding:0 14px;height:46px;position:sticky;top:0;z-index:500}}
+.logo{{font-size:17px;font-weight:900;letter-spacing:-1px;color:#fff;white-space:nowrap;flex-shrink:0;display:flex;align-items:center;gap:6px}}
+.logo-b{{color:var(--amber)}}
+.logo-ru{{background:var(--amber);color:#000;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:900;letter-spacing:1px}}
+.hdr-idx{{display:flex;flex:1;overflow:hidden;border-left:1px solid var(--bd);margin-left:8px}}
+.hdr-item{{display:flex;align-items:center;gap:5px;padding:0 12px;border-right:1px solid var(--bd);font-size:11px;white-space:nowrap;cursor:pointer;transition:background .12s;height:46px}}
+.hdr-item:hover{{background:rgba(245,158,11,.07)}}
+.hdr-name{{color:var(--muted);font-weight:600;font-size:9px;letter-spacing:.5px;text-transform:uppercase}}
+.hdr-val{{font-weight:800;font-variant-numeric:tabular-nums;font-family:var(--mono)}}
+.hdr-ch{{font-size:10px;font-weight:700;font-family:var(--mono)}}
+.hdr-right{{margin-left:auto;display:flex;align-items:center;gap:10px;flex-shrink:0}}
+.live-dot{{width:7px;height:7px;border-radius:50%;background:var(--green);animation:blink 2s ease-in-out infinite}}
+@keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.25}}}}
+.live-txt{{font-size:9px;font-weight:900;color:var(--green);letter-spacing:1.5px}}
+.hdr-clock{{font-family:var(--mono);font-size:11px;color:var(--muted)}}
+.sess-badge{{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;padding:3px 8px;border:1px solid var(--bd);border-radius:5px;white-space:nowrap}}
+.sess-dot{{width:6px;height:6px;border-radius:50%;background:var(--muted);flex-shrink:0}}
+.sess-dot.open{{background:var(--green);box-shadow:0 0 6px var(--green)}}
+.sess-dot.closed{{background:var(--red)}}
+.sess-dot.pre{{background:var(--amber)}}
 
-/* ── Ticker ── */
-.ticker-wrap{{background:var(--surface);border-bottom:1px solid var(--border);overflow:hidden;height:40px;display:flex;align-items:center;position:relative}}
-.ticker-wrap::before,.ticker-wrap::after{{content:'';position:absolute;top:0;bottom:0;width:60px;z-index:10;pointer-events:none}}
-.ticker-wrap::before{{left:0;background:linear-gradient(90deg,var(--surface),transparent)}}
-.ticker-wrap::after{{right:0;background:linear-gradient(-90deg,var(--surface),transparent)}}
-.ticker-inner{{display:flex;gap:0;animation:scroll 80s linear infinite;white-space:nowrap;will-change:transform}}
+/* TICKER */
+.ticker{{background:#030810;border-bottom:1px solid var(--bd);height:32px;overflow:hidden;display:flex;align-items:center;position:relative}}
+.ticker::before,.ticker::after{{content:'';position:absolute;top:0;bottom:0;width:32px;z-index:10;pointer-events:none}}
+.ticker::before{{left:0;background:linear-gradient(90deg,#030810,transparent)}}
+.ticker::after{{right:0;background:linear-gradient(-90deg,#030810,transparent)}}
+.ticker-inner{{display:flex;animation:scroll 150s linear infinite;will-change:transform;white-space:nowrap}}
 .ticker-inner:hover{{animation-play-state:paused}}
 @keyframes scroll{{from{{transform:translateX(0)}}to{{transform:translateX(-50%)}}}}
-.tick{{display:inline-flex;align-items:center;gap:8px;padding:0 24px;border-right:1px solid var(--border);font-size:12px;cursor:default}}
-.tname{{color:var(--muted);font-weight:600;font-size:11px;letter-spacing:.3px}}
-.tprice{{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums}}
-.tch{{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums}}
+.tick{{display:inline-flex;align-items:center;gap:5px;padding:0 14px;border-right:1px solid var(--bd);height:32px}}
+.tn{{color:var(--muted);font-weight:700;font-size:9px;letter-spacing:.3px}}
+.tp{{font-weight:800;font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums}}
+.tc{{font-size:9px;font-weight:700;font-family:var(--mono)}}
 
-/* ── Main layout ── */
-.page-wrap{{max-width:1440px;margin:0 auto;padding:24px 20px;display:grid;grid-template-columns:200px 1fr 200px;gap:20px;align-items:start}}
-.main{{min-width:0}}
-/* Sidebar */
-.sidebar{{display:flex;flex-direction:column;gap:14px;position:sticky;top:72px}}
-.swidget{{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:8px;transition:border-color .18s}}
-.swidget:hover{{border-color:var(--accent)}}
-.sw-header{{display:flex;align-items:center;justify-content:space-between}}
-.sw-label{{font-size:10px;font-weight:800;color:var(--muted);letter-spacing:1px;text-transform:uppercase}}
-.sw-periods{{display:flex;gap:2px}}
-.sw-period{{font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;border:1px solid var(--border);color:var(--muted);cursor:pointer;transition:all .15s;background:none;letter-spacing:.3px}}
-.sw-period:hover,.sw-period.active{{background:var(--accent);border-color:var(--accent);color:#fff}}
-.sw-price{{font-size:24px;font-weight:800;letter-spacing:-.5px;font-variant-numeric:tabular-nums;line-height:1}}
-.sw-change{{font-size:12px;font-weight:700;display:flex;align-items:center;gap:4px}}
-.sw-hist{{font-size:11px;color:var(--muted);min-height:14px}}
-.sw-arrow{{font-size:9px}}
-.sw-bar-wrap{{width:100%;height:3px;background:var(--border);border-radius:2px;overflow:hidden}}
-.sw-bar{{height:100%;border-radius:2px;transition:width .6s ease}}
-@media(max-width:1024px){{
-  .page-wrap{{grid-template-columns:1fr;grid-template-rows:auto}}
-  .sidebar{{flex-direction:row;flex-wrap:wrap;position:static}}
-  .swidget{{flex:1;min-width:140px}}
-}}
-@media(max-width:640px){{.page-wrap{{padding:12px}}}}
+/* PANEL HEADER */
+.panel-hdr{{display:flex;align-items:center;gap:7px;padding:7px 12px;border-bottom:1px solid var(--bd);background:rgba(245,158,11,.04);flex-shrink:0}}
+.panel-title{{font-size:9px;font-weight:900;letter-spacing:2px;color:var(--amber);text-transform:uppercase}}
 
-/* ── Metrics bar ── */
-.metrics-bar{{background:var(--surface);border-bottom:1px solid var(--border);padding:0 20px;overflow-x:auto;scrollbar-width:none}}
-.metrics-bar::-webkit-scrollbar{{display:none}}
-.metrics-row{{display:flex;gap:0;min-width:max-content;height:80px;align-items:stretch}}
-.metric{{display:flex;flex-direction:column;justify-content:center;padding:0 24px;border-right:1px solid var(--border);gap:3px;min-width:140px;cursor:default;transition:background .15s}}
-.metric:first-child{{padding-left:0}}
-.metric:last-child{{border-right:none}}
-.metric:hover{{background:rgba(255,255,255,.03)}}
-.metric-label{{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.8px;text-transform:uppercase}}
-.metric-value{{font-size:20px;font-weight:800;letter-spacing:-.5px;font-variant-numeric:tabular-nums;line-height:1}}
-.metric-sub{{font-size:11px;font-weight:600;margin-top:1px}}
-.metric-bar-wrap{{width:100%;height:3px;background:var(--border);border-radius:2px;margin-top:4px;overflow:hidden}}
-.metric-bar-fill{{height:100%;border-radius:2px;transition:width .5s ease}}
-/* ── Fear & Greed gauge ── */
-.fg-metric{{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 28px;border-right:1px solid var(--border);gap:4px;cursor:default}}
-.fg-label{{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;align-self:flex-start}}
-.fg-body{{display:flex;align-items:center;gap:14px}}
-.fg-gauge{{position:relative;width:64px;height:34px;overflow:visible}}
-.fg-gauge svg{{width:64px;height:34px}}
-.fg-score{{font-size:22px;font-weight:900;letter-spacing:-.5px;line-height:1}}
-.fg-name{{font-size:11px;font-weight:700;margin-top:1px}}
+/* MAIN GRID */
+.main{{display:grid;grid-template-columns:370px 1fr 255px;gap:8px;padding:8px;align-items:start}}
 
-/* ── Section header ── */
-.section-title{{display:flex;align-items:center;gap:12px;font-size:10px;font-weight:800;color:var(--accent2);letter-spacing:2px;text-transform:uppercase;margin:32px 0 16px}}
-.section-title:first-child{{margin-top:0}}
-.st-line{{flex:1;height:1px;background:var(--border)}}
+/* TV PANEL */
+.tv-panel{{display:flex;flex-direction:column;background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden}}
+.tv-wrap{{position:relative;padding-top:56.25%;background:#000;flex-shrink:0}}
+.tv-wrap video{{position:absolute;top:0;left:0;width:100%;height:100%;border:0;background:#000}}
+.tr-panel{{display:flex;flex-direction:column;max-height:240px}}
+.tr-header{{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid var(--bd);border-top:1px solid var(--bd);font-size:9px;font-weight:800;color:var(--muted);letter-spacing:1px;text-transform:uppercase}}
+.tr-live{{color:var(--green);animation:blink 2s ease-in-out infinite}}
+.tr-body{{flex:1;overflow-y:auto;padding:8px 12px;display:flex;flex-direction:column;gap:4px;scrollbar-width:thin;scrollbar-color:var(--bd) transparent}}
+.tr-line{{font-size:12px;line-height:1.55;color:var(--text);padding:5px 9px;border-radius:5px;background:var(--sf2);border-left:3px solid var(--amber)}}
+.tr-line.tr-dim{{color:var(--muted);background:none;border-left-color:var(--bd);font-size:11px}}
+.tr-footer{{padding:7px 12px;border-top:1px solid var(--bd);display:flex;align-items:center;gap:8px;flex-shrink:0}}
+.dub-btn{{font-size:10px;font-weight:800;padding:5px 11px;border-radius:5px;border:1px solid var(--amber);color:var(--amber);background:none;cursor:pointer;transition:all .15s;white-space:nowrap;letter-spacing:.3px}}
+.dub-btn:hover,.dub-btn.active{{background:var(--amber);color:#000}}
+.tr-hint{{font-size:10px;color:var(--muted);flex:1;line-height:1.4}}
 
-/* ── News grid ── */
-.news-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;margin-bottom:8px}}
+/* CHART PANEL */
+.chart-panel{{display:flex;flex-direction:column;background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden}}
+.chart-controls{{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);flex-wrap:wrap;background:rgba(245,158,11,.03)}}
+.sym-wrap{{display:flex;align-items:center;border:1px solid var(--bd);border-radius:5px;overflow:hidden;background:var(--bg)}}
+.sym-input{{background:none;border:none;color:var(--text);font-size:12px;padding:5px 9px;width:175px;font-family:var(--mono);outline:none}}
+.sym-input::placeholder{{color:var(--muted)}}
+.sym-go{{background:var(--amber);border:none;color:#000;font-weight:900;font-size:13px;padding:5px 10px;cursor:pointer;transition:opacity .15s;line-height:1}}
+.sym-go:hover{{opacity:.85}}
+.pbtn-group{{display:flex;gap:2px}}
+.pbtn{{background:none;border:1px solid var(--bd);color:var(--muted);font-size:10px;font-weight:700;padding:4px 8px;border-radius:4px;cursor:pointer;transition:all .12s}}
+.pbtn:hover{{border-color:var(--amber);color:var(--amber)}}
+.pbtn.active{{background:var(--amber);border-color:var(--amber);color:#000}}
+.chart-info{{display:flex;align-items:baseline;gap:10px;padding:5px 12px;border-bottom:1px solid var(--bd);background:var(--sf2);flex-wrap:wrap;flex-shrink:0}}
+.ci-sym{{font-size:13px;font-weight:800}}
+.ci-price{{font-size:22px;font-weight:900;font-family:var(--mono);font-variant-numeric:tabular-nums}}
+.ci-change{{font-size:12px;font-weight:700;font-family:var(--mono)}}
+.ci-period{{font-size:10px;color:var(--muted);margin-left:auto}}
+.chart-stats{{display:flex;gap:0;flex-wrap:wrap;padding:0 4px;border-bottom:1px solid var(--bd);background:var(--sf);min-height:0}}
+.cs-item{{display:flex;flex-direction:column;gap:1px;padding:5px 12px;border-right:1px solid var(--bd)}}
+.cs-lbl{{font-size:8px;font-weight:800;color:var(--muted);letter-spacing:.6px;text-transform:uppercase}}
+.cs-val{{font-size:11px;font-weight:700;font-family:var(--mono);color:var(--text)}}
+#chart-container{{min-height:440px;flex:1}}
 
-/* ── Card ── */
-.card{{display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden;text-decoration:none;color:inherit;transition:transform .18s,border-color .18s,box-shadow .18s}}
-.card:hover{{transform:translateY(-3px);border-color:var(--accent);box-shadow:0 8px 32px rgba(37,99,235,.15)}}
-.card-img{{width:100%;height:172px;background-size:cover;background-position:center;background-color:var(--surface2);flex-shrink:0}}
-.card-img-placeholder{{background:linear-gradient(135deg,#111827 0%,#1c2537 100%);display:flex;align-items:center;justify-content:center}}
-.card-img-placeholder::after{{content:'◈';font-size:32px;color:#1e3a5f;opacity:.6}}
-.card-body{{padding:14px 16px 16px;display:flex;flex-direction:column;gap:8px;flex:1}}
-.cat-label{{font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--accent2)}}
-.card-title{{font-size:14px;font-weight:700;line-height:1.45;color:var(--text)}}
-.card-desc{{font-size:12px;color:var(--muted);line-height:1.6;margin-top:2px}}
+/* MARKETS PANEL */
+.mkt-panel{{background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}}
+.mkt-group{{font-size:8px;font-weight:900;letter-spacing:2.5px;color:var(--muted);text-transform:uppercase;padding:7px 12px 3px;border-top:1px solid var(--bd)}}
+.mkt-group:first-child{{border-top:none}}
+.mkt-row{{display:flex;align-items:center;padding:4px 12px;border-bottom:1px solid rgba(26,40,64,.4);cursor:pointer;transition:background .1s}}
+.mkt-row:hover{{background:rgba(245,158,11,.05)}}
+.mkt-name{{flex:1;font-size:11px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.mkt-price{{font-family:var(--mono);font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;min-width:70px;text-align:right}}
+.mkt-ch{{font-family:var(--mono);font-size:10px;font-weight:700;min-width:56px;text-align:right}}
+.star{{flex-shrink:0;width:14px;text-align:center;font-size:11px;color:var(--dim);cursor:pointer;margin-right:5px;transition:color .12s;user-select:none}}
+.star:hover{{color:var(--muted)}}
+.star.on{{color:var(--amber)}}
+#mkt-watch:empty::after{{content:'нажми ★ у инструмента';display:block;font-size:9px;color:var(--muted);padding:4px 12px 6px;font-style:italic}}
 
-/* ── Live widget ── */
-.live-widget{{background:var(--surface);border:1px solid var(--border);border-radius:16px;overflow:hidden;margin:8px 0 24px}}
-.lw-header{{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);background:rgba(37,99,235,.08)}}
-.lw-badge{{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:800;color:#ef4444;letter-spacing:1px;text-transform:uppercase}}
-.lw-title{{font-size:14px;font-weight:700;color:var(--text)}}
-.lw-delay-badge{{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.3px;background:var(--surface2);padding:2px 7px;border-radius:10px;border:1px solid var(--border)}}
-.lw-yt-link{{margin-left:auto;font-size:11px;font-weight:700;color:var(--accent2);text-decoration:none;padding:4px 10px;border:1px solid var(--accent);border-radius:6px;transition:background .15s}}
-.lw-yt-link:hover{{background:var(--accent);color:#fff}}
-.lw-close{{background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:2px 6px;border-radius:4px;transition:color .15s;margin-left:8px}}
-.lw-close:hover{{color:var(--text)}}
-.lw-body{{display:grid;grid-template-columns:1fr 320px;gap:0}}
-.lw-video-wrap{{position:relative;padding-top:56.25%;background:#000}}
-.lw-video-wrap iframe,.lw-video-wrap #yt-player-div{{position:absolute;top:0;left:0;width:100%;height:100%;border:0}}
-.lw-transcript{{display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--bg)}}
-.lw-tr-header{{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;flex-shrink:0}}
-.lw-tr-badge{{font-size:10px;font-weight:700;color:var(--green);animation:pulse 2s ease-in-out infinite}}
-.lw-tr-body{{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;max-height:350px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}}
-.tr-line{{font-size:13px;line-height:1.6;color:var(--text);padding:6px 10px;border-radius:8px;background:var(--surface);border-left:3px solid var(--accent)}}
-.tr-line.tr-dim{{color:var(--muted);background:none;border-left-color:var(--border);font-size:12px}}
-.lw-tr-footer{{padding:8px 14px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0}}
-.lw-dub-btn{{font-size:11px;font-weight:700;padding:5px 12px;border-radius:6px;border:1px solid var(--accent);color:var(--accent2);background:none;cursor:pointer;transition:all .15s;white-space:nowrap;flex-shrink:0}}
-.lw-dub-btn:hover,.lw-dub-btn.active{{background:var(--accent);color:#fff}}
-.lw-tr-hint{{font-size:11px;color:var(--muted);line-height:1.5}}
-@media(max-width:900px){{.lw-body{{grid-template-columns:1fr}}.lw-transcript{{border-left:none;border-top:1px solid var(--border)}}}}
-/* ── Mobile ── */
-@media(max-width:640px){{
-  .news-grid{{grid-template-columns:1fr}}
-  .main{{padding:16px 12px}}
-  .header{{padding:0 12px}}
-  .card-img{{height:140px}}
+/* BOTTOM GRID */
+.bottom{{display:grid;grid-template-columns:230px 1fr 1fr;gap:8px;padding:0 8px 8px}}
+
+/* FEAR & GREED */
+.fg-card{{background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden}}
+.fg-body{{padding:12px;display:flex;flex-direction:column;gap:10px;align-items:center}}
+.fg-gauge-wrap{{display:flex;flex-direction:column;align-items:center;gap:4px}}
+.fg-val{{font-size:52px;font-weight:900;font-family:var(--mono);line-height:1}}
+.fg-lbl{{font-size:11px;font-weight:700;letter-spacing:.5px}}
+.breadth-row{{width:100%;display:flex;flex-direction:column;gap:4px}}
+.breadth-label{{font-size:9px;font-weight:800;color:var(--muted);letter-spacing:1px;text-transform:uppercase}}
+.breadth-bg{{height:4px;background:var(--bd);border-radius:2px;overflow:hidden}}
+.breadth-fill{{height:100%;border-radius:2px;transition:width .5s ease}}
+.breadth-txt{{font-size:10px;font-weight:700}}
+
+/* MOVERS */
+.movers-card{{background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}}
+.movers-tabs{{display:flex;border-bottom:1px solid var(--bd)}}
+.mtab{{flex:1;padding:7px;font-size:10px;font-weight:800;border:none;background:none;color:var(--muted);cursor:pointer;transition:all .12s;border-bottom:2px solid transparent;margin-bottom:-1px;letter-spacing:.3px}}
+.mtab.active{{color:var(--amber);border-bottom-color:var(--amber)}}
+.mover-row{{display:flex;align-items:center;padding:6px 12px;border-bottom:1px solid rgba(26,40,64,.4);cursor:pointer;transition:background .1s}}
+.mover-row:hover{{background:rgba(245,158,11,.05)}}
+.mover-name{{font-size:11px;font-weight:700;flex:1;color:var(--text)}}
+.mover-price{{font-family:var(--mono);font-size:10px;font-weight:700;min-width:60px;text-align:right;font-variant-numeric:tabular-nums}}
+.mover-ch{{font-family:var(--mono);font-size:11px;font-weight:800;min-width:56px;text-align:right}}
+
+/* AI BRIEF */
+.ai-card{{background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}}
+.ai-hdr{{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--bd);background:rgba(245,158,11,.04)}}
+.ai-refresh{{cursor:pointer;color:var(--amber);font-size:15px;transition:transform .5s;user-select:none}}
+.ai-refresh:hover{{transform:rotate(180deg)}}
+.ai-body{{padding:12px 14px;font-size:12px;line-height:1.75;color:var(--text);flex:1;min-height:120px}}
+.ai-body.loading{{color:var(--muted);font-style:italic}}
+
+/* NEWS */
+.news-section{{padding:0 8px 24px}}
+.nc-group{{font-size:9px;font-weight:900;letter-spacing:2.5px;color:var(--amber);text-transform:uppercase;padding:14px 0 6px;border-top:1px solid var(--bd);margin-top:6px}}
+.nc-group:first-child{{margin-top:0;border-top:none;padding-top:4px}}
+.nc-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:10px}}
+.nc{{display:flex;flex-direction:column;background:var(--sf);border:1px solid var(--bd);border-radius:7px;overflow:hidden;text-decoration:none;color:inherit;transition:transform .15s,border-color .15s}}
+.nc:hover{{transform:translateY(-2px);border-color:var(--amber)}}
+.nc-img{{width:100%;height:144px;background-size:cover;background-position:center;background-color:var(--sf2)}}
+.nc-img-ph{{background:linear-gradient(135deg,var(--sf2),var(--dim))}}
+.nc-body{{padding:10px 12px;display:flex;flex-direction:column;gap:5px}}
+.nc-cat{{font-size:8px;font-weight:900;letter-spacing:1.5px;color:var(--amber);text-transform:uppercase}}
+.nc-title{{font-size:13px;font-weight:700;line-height:1.45;color:var(--text)}}
+.nc-desc{{font-size:11px;color:var(--muted);line-height:1.5}}
+.nc-empty{{color:var(--muted);text-align:center;padding:40px;font-size:12px}}
+
+/* RESPONSIVE */
+@media(max-width:1200px){{.main{{grid-template-columns:330px 1fr 235px}}}}
+@media(max-width:960px){{
+  .main{{grid-template-columns:1fr}}
+  .bottom{{grid-template-columns:1fr}}
+  .hdr-idx{{display:none}}
 }}
 </style>
 </head>
 <body>
-<header class="header">
-  <div class="logo"><span class="logo-b">Bloomberg</span><span class="logo-ru">RU</span></div>
-  <div class="header-right">
-    <div class="live-badge"><span class="live-dot"></span>LIVE</div>
-    <div class="htime" id="htime-txt">{len(news)} новостей · {len(market)} рынков</div>
+
+<!-- HEADER -->
+<header class="hdr">
+  <div class="logo"><span class="logo-b">B</span>LOOMBERG<span class="logo-ru">RU</span></div>
+  <div class="hdr-idx" id="hdr-idx"></div>
+  <div class="hdr-right">
+    <span class="sess-badge" id="sess-badge" title="Сессия NYSE/NASDAQ">
+      <span class="sess-dot" id="sess-dot"></span><span id="sess-txt">—</span>
+    </span>
+    <span class="live-dot"></span>
+    <span class="live-txt">LIVE</span>
+    <span class="hdr-clock" id="hdr-clock"></span>
   </div>
 </header>
 
-<div class="ticker-wrap">
-  <div class="ticker-inner" id="ticker-inner">
-    {ticker_items}{ticker_items}
-  </div>
+<!-- TICKER -->
+<div class="ticker">
+  <div class="ticker-inner" id="ticker-inner">{ticker_items}{ticker_items}</div>
 </div>
 
-<div class="metrics-bar">
-  <div class="metrics-row" id="metrics-row">
-    <div class="fg-metric">
-      <div class="fg-label">Индекс жадности</div>
-      <div class="fg-body">
-        <div class="fg-gauge">
-          <svg viewBox="0 0 64 34" fill="none">
-            <path d="M4 34 A28 28 0 0 1 60 34" stroke="#1c2537" stroke-width="7" stroke-linecap="round"/>
-            <path id="fg-arc" d="M4 34 A28 28 0 0 1 60 34" stroke="#94a3b8" stroke-width="7" stroke-linecap="round"
-                  stroke-dasharray="88" stroke-dashoffset="88" style="transition:stroke-dashoffset .8s ease,stroke .8s ease"/>
-            <circle id="fg-needle" cx="32" cy="34" r="0" fill="white"/>
-          </svg>
-        </div>
-        <div>
-          <div class="fg-score" id="fg-score">—</div>
-          <div class="fg-name" id="fg-name">загрузка...</div>
-        </div>
+<!-- MAIN GRID -->
+<div class="main">
+
+  <!-- LEFT: Bloomberg TV -->
+  <div class="tv-panel">
+    <div class="panel-hdr">
+      <span class="live-dot"></span>
+      <span class="panel-title">Bloomberg Television</span>
+    </div>
+    <div class="tv-wrap">
+      <video id="bloomberg-video" controls autoplay muted playsinline></video>
+    </div>
+    <div class="tr-panel">
+      <div class="tr-header">
+        <span>RU Перевод</span>
+        <span class="tr-live" id="tr-status">●</span>
+      </div>
+      <div class="tr-body" id="tr-body">
+        <div class="tr-line tr-dim">Нажмите «Озвучка RU» — через ~4 сек появится живой перевод голосом.</div>
+      </div>
+      <div class="tr-footer">
+        <button class="dub-btn" id="dub-btn" onclick="toggleDubbing()">▶ Озвучка RU</button>
+        <span class="tr-hint" id="tr-hint">Whisper + перевод · ≤5 сек задержки</span>
       </div>
     </div>
-    <div class="metric"><div class="metric-label">Настроение рынка</div><div class="metric-value" id="m-mood">—</div><div class="metric-sub" id="m-mood-sub"></div></div>
-    <div class="metric"><div class="metric-label">Рынки растут</div><div class="metric-value" id="m-breadth">—</div><div class="metric-bar-wrap"><div class="metric-bar-fill" id="m-breadth-bar" style="background:var(--green);width:0%"></div></div></div>
-    <div class="metric"><div class="metric-label">Лидер роста</div><div class="metric-value" style="font-size:15px" id="m-top-name">—</div><div class="metric-sub" id="m-top-val"></div></div>
-    <div class="metric"><div class="metric-label">Лидер падения</div><div class="metric-value" style="font-size:15px" id="m-bot-name">—</div><div class="metric-sub" id="m-bot-val"></div></div>
-    <div class="metric"><div class="metric-label">Bitcoin</div><div class="metric-value" id="m-btc">—</div><div class="metric-sub" id="m-btc-ch"></div></div>
-    <div class="metric"><div class="metric-label">Gold</div><div class="metric-value" id="m-gold">—</div><div class="metric-sub" id="m-gold-ch"></div></div>
-    <div class="metric"><div class="metric-label">USD/RUB</div><div class="metric-value" id="m-rub">—</div><div class="metric-sub" id="m-rub-ch"></div></div>
-    <div class="metric"><div class="metric-label">Oil WTI</div><div class="metric-value" id="m-oil">—</div><div class="metric-sub" id="m-oil-ch"></div></div>
   </div>
-</div>
 
-<div class="page-wrap">
+  <!-- CENTER: Interactive Chart -->
+  <div class="chart-panel">
+    <div class="chart-controls">
+      <div class="sym-wrap">
+        <input type="text" id="sym-input" class="sym-input" value="SPY"
+               placeholder="SPY, NVDA, BTC-USD, GC=F..."
+               onkeydown="if(event.key==='Enter')loadChart()">
+        <button class="sym-go" onclick="loadChart()">→</button>
+      </div>
+      <div class="pbtn-group">
+        <button class="pbtn" data-p="1d" data-i="5m" onclick="setPeriod(this)">1Д</button>
+        <button class="pbtn" data-p="5d" data-i="30m" onclick="setPeriod(this)">5Д</button>
+        <button class="pbtn active" data-p="1mo" data-i="1d" onclick="setPeriod(this)">1М</button>
+        <button class="pbtn" data-p="3mo" data-i="1d" onclick="setPeriod(this)">3М</button>
+        <button class="pbtn" data-p="6mo" data-i="1d" onclick="setPeriod(this)">6М</button>
+        <button class="pbtn" data-p="1y" data-i="1d" onclick="setPeriod(this)">1Г</button>
+        <button class="pbtn" data-p="5y" data-i="1wk" onclick="setPeriod(this)">5Г</button>
+      </div>
+      <div class="pbtn-group" style="margin-left:auto">
+        <button class="pbtn active" id="ind-ma" onclick="toggleInd('ma',this)" title="Скользящие средние 20/50">MA</button>
+        <button class="pbtn active" id="ind-vol" onclick="toggleInd('vol',this)" title="Объём торгов">Объём</button>
+      </div>
+    </div>
+    <div class="chart-info">
+      <span class="ci-sym" id="ci-sym">S&amp;P 500 (SPY)</span>
+      <span class="ci-price" id="ci-price">—</span>
+      <span class="ci-change" id="ci-change"></span>
+      <span class="ci-period" id="ci-period">1 месяц</span>
+    </div>
+    <div class="chart-stats" id="chart-stats"></div>
+    <div id="chart-container" style="min-height:440px;flex:1"></div>
+  </div>
 
-  <!-- Left sidebar: precious metals -->
-  <aside class="sidebar">
-    {sidebar_left}
-  </aside>
+  <!-- RIGHT: Market Data -->
+  <div class="mkt-panel">
+    <div class="mkt-group">★ Избранное</div>
+    <div id="mkt-watch"></div>
+    <div class="mkt-group">Индексы</div>
+    <div id="mkt-indices"></div>
+    <div class="mkt-group">Крипто</div>
+    <div id="mkt-crypto"></div>
+    <div class="mkt-group">Сырьё</div>
+    <div id="mkt-comm"></div>
+    <div class="mkt-group">Валюты</div>
+    <div id="mkt-fx"></div>
+    <div class="mkt-group">Акции US</div>
+    <div id="mkt-stocks"></div>
+  </div>
 
-  <!-- Center: news -->
-  <main class="main" id="news-main">
-    {news_html}
-  </main>
+</div><!-- /main -->
 
-  <!-- Right sidebar: energy + crypto -->
-  <aside class="sidebar">
-    {sidebar_right}
-  </aside>
+<!-- BOTTOM -->
+<div class="bottom">
 
+  <!-- Fear & Greed -->
+  <div class="fg-card">
+    <div class="panel-hdr">
+      <span class="panel-title">Страх &amp; Жадность</span>
+    </div>
+    <div class="fg-body">
+      <div class="fg-gauge-wrap">
+        <svg width="130" height="70" viewBox="0 0 130 70">
+          <path d="M10 65 A55 55 0 0 1 120 65" stroke="#1a2840" stroke-width="11" stroke-linecap="round" fill="none"/>
+          <path id="fg-arc" d="M10 65 A55 55 0 0 1 120 65" stroke="#4a6080" stroke-width="11"
+                stroke-linecap="round" fill="none"
+                stroke-dasharray="172" stroke-dashoffset="172"
+                style="transition:stroke-dashoffset .9s ease,stroke .9s ease"/>
+        </svg>
+        <div class="fg-val" id="fg-val">—</div>
+        <div class="fg-lbl" id="fg-lbl">загрузка...</div>
+      </div>
+      <div class="breadth-row">
+        <div class="breadth-label">Рынки растут</div>
+        <div class="breadth-bg"><div class="breadth-fill" id="breadth-bar" style="width:50%;background:var(--green)"></div></div>
+        <div class="breadth-txt" id="breadth-txt"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Top Movers -->
+  <div class="movers-card">
+    <div class="panel-hdr"><span class="panel-title">Топ Движение</span></div>
+    <div class="movers-tabs">
+      <button class="mtab active" id="tab-g" onclick="showMovers('gainers')">▲ Лидеры роста</button>
+      <button class="mtab" id="tab-l" onclick="showMovers('losers')">▼ Лидеры падения</button>
+    </div>
+    <div id="movers-list"></div>
+  </div>
+
+  <!-- AI Brief -->
+  <div class="ai-card">
+    <div class="ai-hdr">
+      <span class="panel-title">AI Анализ рынка</span>
+      <span class="ai-refresh" onclick="loadAI()" title="Обновить">↻</span>
+    </div>
+    <div class="ai-body loading" id="ai-body">Загрузка анализа...</div>
+  </div>
+
+</div><!-- /bottom -->
+
+<!-- NEWS -->
+<div class="news-section">
+  <div id="news-main">{news_html}</div>
 </div>
 
 <script>
-function fmtPrice(p){{
-  if(p>100)return p.toLocaleString('ru-RU',{{minimumFractionDigits:2,maximumFractionDigits:2}});
-  if(p<1)return p.toFixed(4);
-  return p.toLocaleString('ru-RU',{{minimumFractionDigits:2,maximumFractionDigits:2}});
-}}
-function buildTick(m){{
-  var clr=m.change>=0?'#22c55e':'#ef4444';
-  var sign=m.change>=0?'+':'';
-  return '<div class="tick"><span class="tname">'+m.name+'</span>'
-    +'<span class="tprice">'+fmtPrice(m.price)+'</span>'
-    +'<span class="tch" style="color:'+clr+'">'+sign+m.change.toFixed(2)+'%</span></div>';
-}}
-function buildCard(a,cat){{
-  var title=a.title_ru||a.title;
-  var desc=a.desc_ru||a.desc||'';
-  var img=a.img?'<div class="card-img" style="background-image:url('+a.img+')"></div>'
-                :'<div class="card-img card-img-placeholder"></div>';
-  return '<a class="card" href="'+(a.link||'#')+'" target="_blank">'
-    +img+'<div class="card-body">'
-    +'<div class="cat-label">'+cat+'</div>'
-    +'<div class="card-title">'+title+'</div>'
-    +(desc?'<div class="card-desc">'+desc+'</div>':'')
-    +'</div></a>';
-}}
-function clr(v){{return v>=0?'#22c55e':'#ef4444';}}
-function sign(v){{return v>=0?'+':''}}
-function pct(v){{return sign(v)+v.toFixed(2)+'%';}}
-
-function updateMetrics(data){{
-  // Sentiment: avg change of indices (excl. currencies & crypto)
-  var indices=['S&P 500','NASDAQ','DOW','FTSE 100','DAX','Nikkei'];
-  var idxData=data.filter(m=>indices.includes(m.name));
-  var avgChange=idxData.length?idxData.reduce((s,m)=>s+m.change,0)/idxData.length:0;
-  var moodEl=document.getElementById('m-mood');
-  var moodSub=document.getElementById('m-mood-sub');
-  if(avgChange>1){{moodEl.textContent='Жадность';moodEl.style.color='#22c55e';moodSub.textContent='Рынки уверенно растут';moodSub.style.color='#22c55e';}}
-  else if(avgChange>0){{moodEl.textContent='Оптимизм';moodEl.style.color='#86efac';moodSub.textContent='Умеренный рост';moodSub.style.color='#86efac';}}
-  else if(avgChange>-1){{moodEl.textContent='Нейтрально';moodEl.style.color='#94a3b8';moodSub.textContent='Рынки в боковике';moodSub.style.color='#94a3b8';}}
-  else if(avgChange>-2){{moodEl.textContent='Тревога';moodEl.style.color='#fb923c';moodSub.textContent='Продавцы давят';moodSub.style.color='#fb923c';}}
-  else{{moodEl.textContent='Страх';moodEl.style.color='#ef4444';moodSub.textContent='Распродажа на рынках';moodSub.style.color='#ef4444';}}
-
-  // Breadth: % of all instruments rising
-  var rising=data.filter(m=>m.change>=0).length;
-  var breadthPct=Math.round(rising/data.length*100);
-  document.getElementById('m-breadth').textContent=rising+' из '+data.length;
-  document.getElementById('m-breadth').style.color=breadthPct>=50?'#22c55e':'#ef4444';
-  var bar=document.getElementById('m-breadth-bar');
-  bar.style.width=breadthPct+'%';
-  bar.style.background=breadthPct>=50?'#22c55e':'#ef4444';
-
-  // Top gainer / loser
-  var sorted=[...data].sort((a,b)=>b.change-a.change);
-  var top=sorted[0],bot=sorted[sorted.length-1];
-  document.getElementById('m-top-name').textContent=top.name;
-  var tv=document.getElementById('m-top-val');tv.textContent=pct(top.change);tv.style.color='#22c55e';
-  document.getElementById('m-bot-name').textContent=bot.name;
-  var bv=document.getElementById('m-bot-val');bv.textContent=pct(bot.change);bv.style.color='#ef4444';
-
-  // Individual instruments
-  var byName={{}};data.forEach(m=>{{byName[m.name]=m;}});
-  function setMetric(valId,chId,name,fmt){{
-    var m=byName[name];if(!m)return;
-    document.getElementById(valId).textContent=fmt?fmt(m.price):fmtPrice(m.price);
-    var el=document.getElementById(chId);el.textContent=pct(m.change);el.style.color=clr(m.change);
+// CLOCK + СТАТУС СЕССИИ NYSE
+(function(){{
+  var el=document.getElementById('hdr-clock');
+  function fmtDur(mins){{
+    mins=Math.max(0,Math.round(mins));
+    var h=Math.floor(mins/60),m=mins%60;
+    return (h>0?h+'ч ':'')+m+'м';
   }}
-  setMetric('m-btc','m-btc-ch','Bitcoin',p=>'$'+Math.round(p).toLocaleString('ru-RU'));
-  setMetric('m-gold','m-gold-ch','Gold',p=>'$'+Math.round(p).toLocaleString('ru-RU'));
-  setMetric('m-rub','m-rub-ch','USD/RUB',p=>p.toFixed(2)+'₽');
-  setMetric('m-oil','m-oil-ch','Oil (WTI)',p=>'$'+p.toFixed(2));
+  function updateSession(){{
+    var dot=document.getElementById('sess-dot'),txt=document.getElementById('sess-txt');
+    if(!dot||!txt)return;
+    var et=new Date(new Date().toLocaleString('en-US',{{timeZone:'America/New_York'}}));
+    var dow=et.getDay(),mins=et.getHours()*60+et.getMinutes();
+    var OPEN=570,CLOSE=960,PRE=240,AFT=1200; // 9:30 / 16:00 / 4:00 / 20:00
+    var wd=dow>=1&&dow<=5;
+    dot.className='sess-dot';
+    if(wd&&mins>=OPEN&&mins<CLOSE){{
+      dot.classList.add('open');txt.textContent='США открыто · до закрытия '+fmtDur(CLOSE-mins);
+    }}else if(wd&&mins>=PRE&&mins<OPEN){{
+      dot.classList.add('pre');txt.textContent='Пре-маркет · до открытия '+fmtDur(OPEN-mins);
+    }}else if(wd&&mins>=CLOSE&&mins<AFT){{
+      dot.classList.add('pre');txt.textContent='Пост-маркет · открытие '+fmtDur(24*60-mins+OPEN);
+    }}else{{
+      dot.classList.add('closed');
+      txt.textContent=(dow===0||dow===6)?'США закрыто · выходной':'США закрыто';
+    }}
+  }}
+  setInterval(function(){{
+    el.textContent=new Date().toLocaleTimeString('ru-RU',{{timeZone:'Europe/Moscow',hour12:false}})+' МСК';
+  }},1000);
+  updateSession();setInterval(updateSession,30000);
+}})();
+
+// PRICE FORMATTER
+function fp(p,name){{
+  if(p===null||p===undefined||isNaN(p))return '—';
+  if(name&&name.includes('/'))return p.toFixed(4);
+  if(p>10000)return '$'+Math.round(p).toLocaleString('ru-RU');
+  if(p>1000)return '$'+p.toLocaleString('ru-RU',{{minimumFractionDigits:2,maximumFractionDigits:2}});
+  if(p>100)return p.toFixed(2);
+  if(p>1)return p.toFixed(4);
+  return p.toFixed(6);
+}}
+function clr(v){{return v>=0?'var(--green)':'var(--red)';}}
+function pct(v){{return (v>=0?'+':'')+v.toFixed(2)+'%';}}
+
+// MARKET DATA
+var _mkt=[],_moverData={{gainers:[],losers:[]}},_activeTab='gainers';
+var INDICES=['S&P 500','NASDAQ','DOW','FTSE 100','DAX','Nikkei'];
+var CRYPTO=['Bitcoin','Ethereum','Solana','BNB'];
+var COMM=['Gold','Silver','Platinum','Palladium','Copper','Oil (WTI)','Brent','Nat. Gas'];
+var FX=['EUR/USD','USD/RUB','GBP/USD','USD/JPY','USD/CNY'];
+var STOCKS=['NVIDIA','Apple','Microsoft','Amazon','Alphabet','Meta','Tesla','Berkshire'];
+
+// SYM MAP: display name → Yahoo ticker
+var SYM={{
+  'S&P 500':'^GSPC','NASDAQ':'^IXIC','DOW':'^DJI','FTSE 100':'^FTSE','DAX':'^GDAXI','Nikkei':'^N225',
+  'Bitcoin':'BTC-USD','Ethereum':'ETH-USD','Solana':'SOL-USD','BNB':'BNB-USD',
+  'Gold':'GC=F','Silver':'SI=F','Platinum':'PL=F','Palladium':'PA=F',
+  'Copper':'HG=F','Oil (WTI)':'CL=F','Brent':'BZ=F','Nat. Gas':'NG=F',
+  'EUR/USD':'EURUSD=X','USD/RUB':'RUB=X','GBP/USD':'GBPUSD=X','USD/JPY':'JPY=X','USD/CNY':'CNY=X',
+  'NVIDIA':'NVDA','Apple':'AAPL','Microsoft':'MSFT','Amazon':'AMZN',
+  'Alphabet':'GOOGL','Meta':'META','Tesla':'TSLA','Berkshire':'BRK-B',
+}};
+
+function mktRows(names,data){{
+  var d={{}};data.forEach(m=>d[m.name]=m);
+  return names.map(n=>{{
+    var m=d[n];if(!m)return '';
+    return '<div class="mkt-row" data-n="'+n+'">'
+      +'<span class="star'+(isWatched(n)?' on':'')+'" data-star="'+n+'">★</span>'
+      +'<span class="mkt-name">'+n+'</span>'
+      +'<span class="mkt-price">'+fp(m.price,n)+'</span>'
+      +'<span class="mkt-ch" style="color:'+clr(m.change)+'">'+pct(m.change)+'</span></div>';
+  }}).join('');
 }}
 
-function setSWidget(name,priceId,chId,arrId,pctId,barId,fmt,data){{
-  var byName={{}};data.forEach(m=>{{byName[m.name]=m;}});
-  var m=byName[name];if(!m)return;
-  var p=fmt?fmt(m.price):fmtPrice(m.price);
-  document.getElementById(priceId).textContent=p;
-  var c=m.change,color=c>=0?'#22c55e':'#ef4444';
-  document.getElementById(chId).style.color=color;
-  document.getElementById(arrId).textContent=c>=0?'▲':'▼';
-  document.getElementById(pctId).textContent=(c>=0?'+':'')+c.toFixed(2)+'%';
-  // bar: center=50%, +5% → 100%, -5% → 0%
-  var barW=Math.min(100,Math.max(0,50+c*10));
-  var bar=document.getElementById(barId);bar.style.width=barW+'%';bar.style.background=color;
+function updateHeader(data){{
+  var d={{}};data.forEach(m=>d[m.name]=m);
+  var show=['S&P 500','NASDAQ','DOW','Bitcoin','Gold','Oil (WTI)'];
+  document.getElementById('hdr-idx').innerHTML=show.map(n=>{{
+    var m=d[n];if(!m)return '';
+    return '<div class="hdr-item" data-n="'+n+'">'
+      +'<span class="hdr-name">'+n+'</span>'
+      +'<span class="hdr-val">'+fp(m.price,n)+'</span>'
+      +'<span class="hdr-ch" style="color:'+clr(m.change)+'">'+pct(m.change)+'</span></div>';
+  }}).join('');
 }}
-function updateSidebars(data){{
-  setSWidget('Gold',     'sw-gold-price',     'sw-gold-ch',     'sw-gold-arr',     'sw-gold-pct',     'sw-gold-bar',     p=>'$'+Math.round(p).toLocaleString('ru-RU'), data);
-  setSWidget('Silver',   'sw-silver-price',   'sw-silver-ch',   'sw-silver-arr',   'sw-silver-pct',   'sw-silver-bar',   p=>'$'+p.toFixed(2), data);
-  setSWidget('Platinum', 'sw-platinum-price', 'sw-platinum-ch', 'sw-platinum-arr', 'sw-platinum-pct', 'sw-platinum-bar', p=>'$'+Math.round(p).toLocaleString('ru-RU'), data);
-  setSWidget('Palladium','sw-palladium-price','sw-palladium-ch','sw-palladium-arr','sw-palladium-pct','sw-palladium-bar',p=>'$'+Math.round(p).toLocaleString('ru-RU'), data);
-  setSWidget('Oil (WTI)','sw-oil-price',      'sw-oil-ch',      'sw-oil-arr',      'sw-oil-pct',      'sw-oil-bar',      p=>'$'+p.toFixed(2), data);
-  setSWidget('Nat. Gas', 'sw-gas-price',      'sw-gas-ch',      'sw-gas-arr',      'sw-gas-pct',      'sw-gas-bar',      p=>'$'+p.toFixed(3), data);
-  setSWidget('Bitcoin',  'sw-btc-price',      'sw-btc-ch',      'sw-btc-arr',      'sw-btc-pct',      'sw-btc-bar',      p=>'$'+Math.round(p).toLocaleString('ru-RU'), data);
-  setSWidget('Ethereum', 'sw-eth-price',      'sw-eth-ch',      'sw-eth-arr',      'sw-eth-pct',      'sw-eth-bar',      p=>'$'+Math.round(p).toLocaleString('ru-RU'), data);
+
+function updateTicker(data){{
+  var html=data.map(m=>
+    '<span class="tick"><span class="tn">'+m.name+'</span>'
+    +'<span class="tp">'+fp(m.price,m.name)+'</span>'
+    +'<span class="tc" style="color:'+clr(m.change)+'">'+pct(m.change)+'</span></span>'
+  ).join('');
+  document.getElementById('ticker-inner').innerHTML=html+html;
 }}
+
+function updateBreadth(data){{
+  var rising=data.filter(m=>m.change>=0).length;
+  var p=Math.round(rising/data.length*100);
+  var bar=document.getElementById('breadth-bar');
+  bar.style.width=p+'%';bar.style.background=p>=50?'var(--green)':'var(--red)';
+  var t=document.getElementById('breadth-txt');
+  t.textContent=rising+' из '+data.length+' ('+p+'%)';
+  t.style.color=p>=50?'var(--green)':'var(--red)';
+}}
+
+function updateMovers(data){{
+  var all=[...data].sort((a,b)=>b.change-a.change);
+  _moverData={{gainers:all.slice(0,8),losers:all.slice(-8).reverse()}};
+  showMovers(_activeTab);
+}}
+
+function showMovers(tab){{
+  _activeTab=tab;
+  document.getElementById('tab-g').className='mtab'+(tab==='gainers'?' active':'');
+  document.getElementById('tab-l').className='mtab'+(tab==='losers'?' active':'');
+  var rows=_moverData[tab]||[];
+  document.getElementById('movers-list').innerHTML=rows.map(m=>
+    '<div class="mover-row" data-n="'+m.name+'">'
+    +'<span class="mover-name">'+m.name+'</span>'
+    +'<span class="mover-price">'+fp(m.price,m.name)+'</span>'
+    +'<span class="mover-ch" style="color:'+clr(m.change)+'">'+pct(m.change)+'</span></div>'
+  ).join('');
+}}
+
+// ── WATCHLIST (избранное, хранится в браузере) ──
+var _watch=[];
+try{{_watch=JSON.parse(localStorage.getItem('bbg_watch')||'[]');}}catch(e){{_watch=[];}}
+function isWatched(n){{return _watch.indexOf(n)>=0;}}
+function toggleWatch(n){{
+  var i=_watch.indexOf(n);
+  if(i>=0)_watch.splice(i,1); else _watch.push(n);
+  try{{localStorage.setItem('bbg_watch',JSON.stringify(_watch));}}catch(e){{}}
+  if(_mkt.length)renderMkt(_mkt);
+}}
+function renderWatch(data){{
+  var el=document.getElementById('mkt-watch');if(!el)return;
+  el.innerHTML=_watch.length?mktRows(_watch,data):'';
+}}
+
+function renderMkt(data){{
+  _mkt=data;
+  updateTicker(data);
+  updateHeader(data);
+  renderWatch(data);
+  document.getElementById('mkt-indices').innerHTML=mktRows(INDICES,data);
+  document.getElementById('mkt-crypto').innerHTML=mktRows(CRYPTO,data);
+  document.getElementById('mkt-comm').innerHTML=mktRows(COMM,data);
+  document.getElementById('mkt-fx').innerHTML=mktRows(FX,data);
+  document.getElementById('mkt-stocks').innerHTML=mktRows(STOCKS,data);
+  updateBreadth(data);
+  updateMovers(data);
+}}
+
 function refreshMarket(){{
   fetch('/api/market').then(r=>r.json()).then(data=>{{
     if(!data||!data.length)return;
-    var html='';data.forEach(m=>{{html+=buildTick(m);}});
-    document.getElementById('ticker-inner').innerHTML=html+html;
-    updateMetrics(data);
-    updateSidebars(data);
-  }}).catch(()=>{{}});
+    renderMkt(data);
+  }}).catch(function(){{}});
 }}
-refreshMarket();
-setInterval(refreshMarket,30000);
-function refreshNews(){{
-  fetch('/api/news').then(r=>r.json()).then(data=>{{
-    if(!data||!data.length)return;
-    // Deduplicate by link, then by title prefix
-    var seen=new Set(),deduped=[];
-    data.forEach(a=>{{
-      var key=(a.link||a.title.slice(0,80)).replace(/\/$/,'');
-      if(!seen.has(key)){{seen.add(key);deduped.push(a);}}
-    }});
-    data=deduped;
-    var cats={{}};
-    data.forEach(a=>{{if(!cats[a.cat])cats[a.cat]=[];cats[a.cat].push(a);}});
-    var html='';
-    Object.keys(cats).forEach(cat=>{{
-      html+='<div class="section-title"><span class="st-line"></span>'+cat+'<span class="st-line"></span></div><div class="news-grid">';
-      cats[cat].slice(0,6).forEach(a=>{{html+=buildCard(a,cat);}});
-      html+='</div>';
-    }});
-    if(html)document.getElementById('news-main').innerHTML=html;
-  }}).catch(()=>{{}});
+// Fast-retry until first data arrives (cold cache takes ~10s), then settle to 30s polling.
+var _mktReady=false,_mktTries=0;
+function _pollMarket(){{
+  fetch('/api/market').then(r=>r.json()).then(function(data){{
+    if(data&&data.length){{
+      renderMkt(data);
+      if(!_mktReady){{_mktReady=true;setInterval(refreshMarket,30000);}}
+    }}else if(!_mktReady&&_mktTries<30){{
+      _mktTries++;setTimeout(_pollMarket,2000);
+    }}
+  }}).catch(function(){{if(!_mktReady&&_mktTries<30){{_mktTries++;setTimeout(_pollMarket,2000);}}}});
 }}
-setInterval(refreshNews,300000);
+_pollMarket();
 
-// Fear & Greed gauge
-var fgColors={{
-  'Extreme Fear':'#ef4444','Fear':'#f97316',
-  'Neutral':'#eab308','Greed':'#84cc16','Extreme Greed':'#22c55e'
-}};
-var fgLabelsRu={{
-  'Extreme Fear':'Крайний страх','Fear':'Страх',
-  'Neutral':'Нейтрально','Greed':'Жадность','Extreme Greed':'Крайняя жадность'
-}};
-function loadFearGreed(){{
+// Делегированный клик: звезда → избранное, строка с data-n → график.
+// (никаких инлайновых onclick со строковыми аргументами — устраняет класс бага с экранированием)
+document.addEventListener('click',function(e){{
+  var star=e.target.closest('.star');
+  if(star){{e.stopPropagation();toggleWatch(star.getAttribute('data-star'));return;}}
+  var row=e.target.closest('[data-n]');
+  if(row){{clickMkt(row.getAttribute('data-n'));}}
+}});
+
+// CLICK MARKET ROW → load chart
+function clickMkt(name){{
+  var sym=SYM[name]||name;
+  _curSym=sym;
+  document.getElementById('sym-input').value=sym;
+  document.getElementById('ci-sym').textContent=name+' ('+sym+')';
+  loadChartData(sym,_curPeriod,_curInterval);
+}}
+
+// FEAR & GREED
+var FG_COLORS={{'Extreme Fear':'#ef4444','Fear':'#f97316','Neutral':'#eab308','Greed':'#84cc16','Extreme Greed':'#22c55e'}};
+var FG_RU={{'Extreme Fear':'Крайний страх','Fear':'Страх','Neutral':'Нейтрально','Greed':'Жадность','Extreme Greed':'Крайняя жадность'}};
+function loadFG(){{
   fetch('/api/fear-greed').then(r=>r.json()).then(d=>{{
-    if(!d||d.value==null) return;
-    var v=d.value, label=d.label;
-    var color=fgColors[label]||'#94a3b8';
-    var labelRu=fgLabelsRu[label]||label;
-    // Score + label
-    var scoreEl=document.getElementById('fg-score');
-    scoreEl.textContent=v;
-    scoreEl.style.color=color;
-    var nameEl=document.getElementById('fg-name');
-    nameEl.textContent=labelRu;
-    nameEl.style.color=color;
-    // Animate arc: total arc length ≈ 88 (π×28), dashoffset goes from 88→0 as v→100
-    var arc=document.getElementById('fg-arc');
-    var offset=88-(v/100*88);
-    arc.style.strokeDashoffset=offset;
-    arc.style.stroke=color;
-  }}).catch(()=>{{}});
+    if(!d||d.value==null)return;
+    var c=FG_COLORS[d.label]||'#94a3b8';
+    document.getElementById('fg-val').textContent=d.value;
+    document.getElementById('fg-val').style.color=c;
+    document.getElementById('fg-lbl').textContent=FG_RU[d.label]||d.label;
+    document.getElementById('fg-lbl').style.color=c;
+    document.getElementById('fg-arc').style.strokeDashoffset=172-(d.value/100*172);
+    document.getElementById('fg-arc').style.stroke=c;
+  }}).catch(function(){{}});
 }}
-loadFearGreed();
-setInterval(loadFearGreed, 3600000); // refresh hourly
+loadFG();setInterval(loadFG,3600000);
 
-// Bloomberg TV — hls.js direct HLS stream (no YouTube UI)
+// AI BRIEF
+function loadAI(){{
+  var el=document.getElementById('ai-body');
+  el.className='ai-body loading';el.textContent='Анализирую рынок...';
+  fetch('/api/ai-brief').then(r=>r.json()).then(d=>{{
+    el.className='ai-body';el.textContent=d.brief||'Нет данных';
+  }}).catch(function(){{el.className='ai-body';el.textContent='AI недоступен';}} );
+}}
+setTimeout(loadAI,2000);
+
+// LIGHTWEIGHT CHARTS
+var _chart=null,_series=null,_volSeries=null,_ma20Series=null,_ma50Series=null;
+var _curSym='SPY',_curPeriod='1mo',_curInterval='1d',_lastData=[],_showMA=true,_showVol=true;
+var PERIOD_NAMES={{'1d':'1 день','5d':'5 дней','1mo':'1 месяц','3mo':'3 месяца','6mo':'6 месяцев','1y':'1 год','5y':'5 лет'}};
+
+function sma(data,n){{
+  var out=[],sum=0;
+  for(var i=0;i<data.length;i++){{
+    sum+=data[i].close;
+    if(i>=n)sum-=data[i-n].close;
+    if(i>=n-1)out.push({{time:data[i].time,value:sum/n}});
+  }}
+  return out;
+}}
+
+function initChart(){{
+  var c=document.getElementById('chart-container');
+  _chart=LightweightCharts.createChart(c,{{
+    layout:{{background:{{color:'#0c1624'}},textColor:'#4a6080'}},
+    grid:{{vertLines:{{color:'#1a2840'}},horzLines:{{color:'#1a2840'}}}},
+    crosshair:{{
+      mode:LightweightCharts.CrosshairMode.Normal,
+      vertLine:{{color:'#f59e0b',width:1,style:2}},
+      horzLine:{{color:'#f59e0b',width:1,style:2}}
+    }},
+    rightPriceScale:{{borderColor:'#1a2840'}},
+    timeScale:{{borderColor:'#1a2840',timeVisible:true,secondsVisible:false}},
+    width:c.clientWidth,
+    height:Math.max(440,c.clientHeight||440),
+  }});
+  // объём — гистограмма внизу, на отдельной шкале
+  _volSeries=_chart.addHistogramSeries({{priceFormat:{{type:'volume'}},priceScaleId:'vol'}});
+  _volSeries.priceScale().applyOptions({{scaleMargins:{{top:0.82,bottom:0}}}});
+  // свечи
+  _series=_chart.addCandlestickSeries({{
+    upColor:'#22d47a',downColor:'#ff4466',
+    borderUpColor:'#22d47a',borderDownColor:'#ff4466',
+    wickUpColor:'#22d47a',wickDownColor:'#ff4466',
+  }});
+  // скользящие средние поверх свечей
+  _ma20Series=_chart.addLineSeries({{color:'#3b82f6',lineWidth:1,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false}});
+  _ma50Series=_chart.addLineSeries({{color:'#f59e0b',lineWidth:1,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false}});
+  var ro=new ResizeObserver(function(entries){{
+    for(var e of entries){{
+      _chart.resize(e.contentRect.width,Math.max(440,e.contentRect.height));
+    }}
+  }});
+  ro.observe(c);
+  loadChartData('SPY','1mo','1d');
+}}
+
+function applyIndicators(){{
+  if(!_lastData.length||!_volSeries)return;
+  if(_showVol){{
+    _volSeries.setData(_lastData.map(function(d){{
+      return {{time:d.time,value:d.volume||0,color:(d.close>=d.open?'rgba(34,212,122,.5)':'rgba(255,68,102,.5)')}};
+    }}));
+  }}else{{_volSeries.setData([]);}}
+  if(_showMA&&_lastData.length>=20){{
+    _ma20Series.setData(sma(_lastData,20));
+    _ma50Series.setData(_lastData.length>=50?sma(_lastData,50):[]);
+  }}else{{_ma20Series.setData([]);_ma50Series.setData([]);}}
+}}
+
+function bigNum(v){{
+  if(v===null||v===undefined||isNaN(v))return '—';
+  var a=Math.abs(v);
+  if(a>=1e12)return '$'+(v/1e12).toFixed(2)+'трлн';
+  if(a>=1e9)return '$'+(v/1e9).toFixed(2)+'млрд';
+  if(a>=1e6)return '$'+(v/1e6).toFixed(2)+'млн';
+  if(a>=1e3)return (v/1e3).toFixed(1)+'K';
+  return ''+Math.round(v);
+}}
+function volNum(v){{
+  if(v===null||v===undefined||isNaN(v)||v===0)return '—';
+  var a=Math.abs(v);
+  if(a>=1e9)return (v/1e9).toFixed(2)+'млрд';
+  if(a>=1e6)return (v/1e6).toFixed(2)+'млн';
+  if(a>=1e3)return (v/1e3).toFixed(1)+'K';
+  return ''+Math.round(v);
+}}
+var _statsQuote={{}},_statsRange=null,_statsSym='';
+function renderStats(){{
+  var el=document.getElementById('chart-stats');if(!el)return;
+  var q=_statsQuote||{{}},r=_statsRange,sym=_statsSym;
+  function it(lbl,val){{return '<div class="cs-item"><span class="cs-lbl">'+lbl+'</span><span class="cs-val">'+val+'</span></div>';}}
+  var html='';
+  // диапазон за период — из данных графика, есть всегда
+  if(r)html+=it('Макс/мин ('+r.label+')',fp(r.lo,sym)+' – '+fp(r.hi,sym));
+  // дн. диапазон и 52 нед — из quote, если Yahoo отдал
+  if(q.day_low!=null&&q.day_high!=null)html+=it('Дн. диапазон',fp(q.day_low,sym)+' – '+fp(q.day_high,sym));
+  if(q.year_low!=null&&q.year_high!=null)html+=it('52 нед.',fp(q.year_low,sym)+' – '+fp(q.year_high,sym));
+  if(q.volume)html+=it('Объём',volNum(q.volume));
+  if(q.market_cap)html+=it('Капитализация',bigNum(q.market_cap));
+  if(q.prev!=null)html+=it('Пред. закрытие',fp(q.prev,sym));
+  el.innerHTML=html;
+}}
+function loadQuote(sym){{
+  _statsQuote={{}};_statsSym=sym;
+  fetch('/api/quote?symbol='+encodeURIComponent(sym)).then(r=>r.json()).then(function(q){{
+    _statsQuote=(q&&!q.error)?q:{{}};renderStats();
+  }}).catch(function(){{renderStats();}});
+}}
+
+function loadChartData(sym,period,interval){{
+  if(!_series)return;
+  document.getElementById('ci-price').textContent='...';
+  document.getElementById('ci-change').textContent='';
+  document.getElementById('ci-period').textContent=PERIOD_NAMES[period]||period;
+  _statsRange=null;
+  loadQuote(sym);
+  fetch('/api/ohlcv?symbol='+encodeURIComponent(sym)+'&period='+period+'&interval='+interval)
+    .then(r=>r.json())
+    .then(function(data){{
+      if(!Array.isArray(data)||!data.length){{document.getElementById('ci-price').textContent='нет данных';return;}}
+      _lastData=data;
+      _series.setData(data.map(function(d){{return {{time:d.time,open:d.open,high:d.high,low:d.low,close:d.close}};}}));
+      applyIndicators();
+      _chart.timeScale().fitContent();
+      var last=data[data.length-1],first=data[0];
+      var chg=(last.close-first.open)/first.open*100;
+      document.getElementById('ci-price').textContent=fp(last.close,sym);
+      var cel=document.getElementById('ci-change');
+      cel.textContent=pct(chg);cel.style.color=chg>=0?'var(--green)':'var(--red)';
+      // диапазон за период — из свечей (есть всегда)
+      var hi=-Infinity,lo=Infinity;
+      data.forEach(function(d){{if(d.high>hi)hi=d.high;if(d.low<lo)lo=d.low;}});
+      _statsRange={{hi:hi,lo:lo,label:PERIOD_NAMES[period]||period}};
+      renderStats();
+    }}).catch(function(){{document.getElementById('ci-price').textContent='ошибка';}});
+}}
+
+function toggleInd(kind,btn){{
+  if(kind==='ma'){{_showMA=!_showMA;}}else{{_showVol=!_showVol;}}
+  btn.classList.toggle('active');
+  applyIndicators();
+}}
+
+function setPeriod(btn){{
+  document.querySelectorAll('.pbtn[data-p]').forEach(function(b){{b.classList.remove('active');}});
+  btn.classList.add('active');
+  _curPeriod=btn.dataset.p;_curInterval=btn.dataset.i;
+  loadChartData(_curSym,_curPeriod,_curInterval);
+}}
+
+function loadChart(){{
+  var v=document.getElementById('sym-input').value.trim().toUpperCase();
+  if(!v)return;
+  _curSym=v;
+  document.getElementById('ci-sym').textContent=v;
+  loadChartData(v,_curPeriod,_curInterval);
+}}
+
+// Load Lightweight Charts from CDN
 (function(){{
-  var s=document.createElement('script');
-  s.src='https://cdn.jsdelivr.net/npm/hls.js@latest';
-  s.onload=function(){{
-    fetch('/api/live-hls').then(function(r){{return r.json();}}).then(function(d){{
+  var sc=document.createElement('script');
+  sc.src='https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js';
+  sc.onload=initChart;
+  sc.onerror=function(){{
+    document.getElementById('chart-container').innerHTML=
+      '<div style="color:var(--muted);padding:30px;text-align:center;font-size:12px">⚠ Не удалось загрузить графики.<br>Нужен интернет.</div>';
+  }};
+  document.head.appendChild(sc);
+}})();
+
+// BLOOMBERG TV (hls.js)
+(function(){{
+  var sc=document.createElement('script');
+  sc.src='https://cdn.jsdelivr.net/npm/hls.js@latest';
+  sc.onload=function(){{
+    fetch('/api/live-hls').then(r=>r.json()).then(function(d){{
       if(!d.url)return;
-      var video=document.getElementById('bloomberg-video');
-      if(!video)return;
+      var v=document.getElementById('bloomberg-video');
       if(Hls.isSupported()){{
         var hls=new Hls({{enableWorker:true,lowLatencyMode:true}});
-        hls.loadSource(d.url);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED,function(){{video.play().catch(function(){{}});}});
-      }}else if(video.canPlayType('application/vnd.apple.mpegurl')){{
-        video.src=d.url;
-        video.addEventListener('loadedmetadata',function(){{video.play().catch(function(){{}});}});
+        hls.loadSource(d.url);hls.attachMedia(v);
+        hls.on(Hls.Events.MANIFEST_PARSED,function(){{v.play().catch(function(){{}});}});
+      }}else if(v.canPlayType('application/vnd.apple.mpegurl')){{
+        v.src=d.url;
+        v.addEventListener('loadedmetadata',function(){{v.play().catch(function(){{}});}});
       }}
     }}).catch(function(){{}});
   }};
-  document.head.appendChild(s);
+  document.head.appendChild(sc);
 }})();
 
-// Historical period switcher
-var periodLabels={{'1wk':'за неделю','1mo':'за месяц','1y':'за год'}};
-function loadHist(btn,symbol,period,histId){{
-  // Toggle active button in the same widget
-  var btns=btn.parentNode.querySelectorAll('.sw-period');
-  btns.forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
-  var el=document.getElementById(histId);
-  el.textContent='...';
-  fetch('/api/market/history?symbol='+encodeURIComponent(symbol)+'&period='+period)
-    .then(r=>r.json()).then(d=>{{
-      if(d.change==null){{el.textContent='нет данных';return;}}
-      var c=d.change,color=c>=0?'#22c55e':'#ef4444';
-      var label=periodLabels[period]||period;
-      el.innerHTML='<span style="color:'+color+';font-weight:700">'+(c>=0?'+':'')+c.toFixed(2)+'%</span> '+label;
-    }}).catch(()=>{{el.textContent='';}});
-}}
-// ── Bloomberg TV Russian Dubbing ──────────────────────────────────────────
-var _dubES=null,_dubActive=false;
-var _tts=window.speechSynthesis;
-var _ruVoice=null;
-function _loadVoices(){{
-  var voices=_tts.getVoices();
-  _ruVoice=voices.find(function(v){{return v.lang.startsWith('ru');}});
-}}
+// RUSSIAN DUBBING
+var _dubES=null,_dubActive=false,_tts=window.speechSynthesis,_ruVoice=null;
+function _loadVoices(){{_ruVoice=_tts.getVoices().find(v=>v.lang.startsWith('ru'));}}
 if(_tts.onvoiceschanged!==undefined)_tts.onvoiceschanged=_loadVoices;
 _loadVoices();
 function _speakRu(text){{
-  if(!text||!_tts)return;
-  _tts.cancel();
+  if(!text||!_tts)return;_tts.cancel();
   var u=new SpeechSynthesisUtterance(text);
-  u.lang='ru-RU';u.rate=1.05;
-  if(_ruVoice)u.voice=_ruVoice;
+  u.lang='ru-RU';u.rate=1.05;if(_ruVoice)u.voice=_ruVoice;
   _tts.speak(u);
 }}
-function _addTranscriptLine(text){{
-  var body=document.getElementById('tr-body');
-  if(!body)return;
+function _addLine(text){{
+  var body=document.getElementById('tr-body');if(!body)return;
   var dim=body.querySelector('.tr-dim');if(dim)dim.remove();
-  var line=document.createElement('div');
-  line.className='tr-line';line.textContent=text;
+  var line=document.createElement('div');line.className='tr-line';line.textContent=text;
   body.appendChild(line);
-  while(body.children.length>10)body.removeChild(body.firstChild);
+  while(body.children.length>12)body.removeChild(body.firstChild);
   body.scrollTop=body.scrollHeight;
 }}
 function toggleDubbing(){{
-  var btn=document.getElementById('dub-btn');
-  var hint=document.getElementById('tr-hint');
+  var btn=document.getElementById('dub-btn'),hint=document.getElementById('tr-hint');
   if(_dubActive){{
     if(_dubES){{_dubES.close();_dubES=null;}}
     _tts.cancel();_dubActive=false;
-    btn.textContent='Включить озвучку RU';btn.classList.remove('active');
-    if(hint)hint.textContent='Озвучка остановлена';
+    btn.textContent='▶ Озвучка RU';btn.classList.remove('active');
+    if(hint)hint.textContent='Остановлено';
   }}else{{
     _dubActive=true;
-    btn.textContent='Остановить озвучку';btn.classList.add('active');
-    if(hint)hint.textContent='Подключаюсь... (задержка ~5 сек)';
+    btn.textContent='■ Стоп';btn.classList.add('active');
+    if(hint)hint.textContent='Подключение... (~4 сек)';
     _dubES=new EventSource('/api/live-transcript');
     _dubES.onmessage=function(e){{
-      var d=JSON.parse(e.data);
-      if(!d.text)return;
-      _speakRu(d.text);
-      _addTranscriptLine(d.text);
-      if(hint)hint.textContent='Озвучка активна • последнее обновление: '+new Date().toLocaleTimeString('ru-RU');
+      var d=JSON.parse(e.data);if(!d.text)return;
+      _speakRu(d.text);_addLine(d.text);
+      if(hint)hint.textContent='Активно · '+new Date().toLocaleTimeString('ru-RU');
     }};
-    _dubES.onerror=function(){{
-      if(hint)hint.textContent='Ошибка соединения, переподключение...';
-    }};
+    _dubES.onerror=function(){{if(hint)hint.textContent='Переподключение...';}} ;
   }}
 }}
 
-// Load default history (1wk) for all widgets on startup
-var defaults=[
-  ['GC=F','sw-gold-hist'],['SI=F','sw-silver-hist'],
-  ['PL=F','sw-platinum-hist'],['PA=F','sw-palladium-hist'],
-  ['CL=F','sw-oil-hist'],['NG=F','sw-gas-hist'],
-  ['BTC-USD','sw-btc-hist'],['ETH-USD','sw-eth-hist']
-];
-defaults.forEach(function(d){{
-  fetch('/api/market/history?symbol='+encodeURIComponent(d[0])+'&period=1wk')
-    .then(r=>r.json()).then(function(res){{
-      if(res.change==null)return;
-      var c=res.change,color=c>=0?'#22c55e':'#ef4444';
-      var el=document.getElementById(d[1]);if(!el)return;
-      el.innerHTML='<span style="color:'+color+';font-weight:700">'+(c>=0?'+':'')+c.toFixed(2)+'%</span> за неделю';
-    }}).catch(()=>{{}});
-}});
+// NEWS REFRESH (every 5 min)
+function refreshNews(){{
+  fetch('/api/news').then(r=>r.json()).then(function(data){{
+    if(!data||!data.length)return;
+    var cats={{}};data.forEach(a=>{{if(!cats[a.cat])cats[a.cat]=[];cats[a.cat].push(a);}});
+    var html='';
+    Object.keys(cats).forEach(function(cat){{
+      html+='<div class="nc-group">'+cat+'</div><div class="nc-grid">';
+      cats[cat].slice(0,6).forEach(function(a){{
+        var t=a.title_ru||a.title,d=a.desc_ru||a.desc||'';
+        var img=a.img?'<div class="nc-img" style="background-image:url('+a.img+')"></div>':'<div class="nc-img nc-img-ph"></div>';
+        html+='<a class="nc" href="'+(a.link||'#')+'" target="_blank">'+img
+          +'<div class="nc-body"><div class="nc-cat">'+cat+'</div>'
+          +'<div class="nc-title">'+t+'</div>'
+          +(d?'<div class="nc-desc">'+d.slice(0,130)+'</div>':'')
+          +'</div></a>';
+      }});
+      html+='</div>';
+    }});
+    if(html)document.getElementById('news-main').innerHTML=html;
+  }}).catch(function(){{}});
+}}
+setInterval(refreshNews,300000);
 </script>
 </body>
 </html>"""
+
 
 
 if __name__ == "__main__":

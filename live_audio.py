@@ -28,13 +28,24 @@ def _find_yt_dlp() -> str:
 _YT_DLP = _find_yt_dlp()
 
 
+def _whisper_cache_dir() -> str:
+    """Writable cache dir for the Whisper model — Docker /app if present, else local."""
+    docker_path = "/app/cache_data/whisper"
+    if os.path.isdir("/app/cache_data"):
+        os.makedirs(docker_path, exist_ok=True)
+        return docker_path
+    local = os.path.expanduser("~/.cache/bloomberg-whisper")
+    os.makedirs(local, exist_ok=True)
+    return local
+
+
 def _get_model():
     global _MODEL
     if _MODEL is None:
         from faster_whisper import WhisperModel
         _MODEL = WhisperModel(
             "tiny", device="cpu", compute_type="int8",
-            download_root="/app/cache_data/whisper",
+            download_root=_whisper_cache_dir(),
         )
     return _MODEL
 

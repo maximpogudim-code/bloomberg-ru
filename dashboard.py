@@ -17,44 +17,69 @@ _NEWS_TTL = 300     # 5 min — RSS doesn't update faster
 # ── Market data via Yahoo Finance ────────────────────────────────────────────
 
 _TICKERS = {
+    # Indices
     "S&P 500":      "^GSPC",
     "NASDAQ":       "^IXIC",
     "DOW":          "^DJI",
     "FTSE 100":     "^FTSE",
     "DAX":          "^GDAXI",
     "Nikkei":       "^N225",
+    # Crypto
     "Bitcoin":      "BTC-USD",
     "Ethereum":     "ETH-USD",
+    "Solana":       "SOL-USD",
+    "BNB":          "BNB-USD",
+    # Commodities
     "Gold":         "GC=F",
     "Silver":       "SI=F",
     "Platinum":     "PL=F",
     "Palladium":    "PA=F",
     "Copper":       "HG=F",
     "Oil (WTI)":    "CL=F",
+    "Brent":        "BZ=F",
     "Nat. Gas":     "NG=F",
+    # FX
     "EUR/USD":      "EURUSD=X",
     "USD/RUB":      "RUB=X",
     "GBP/USD":      "GBPUSD=X",
+    "USD/JPY":      "JPY=X",
+    "USD/CNY":      "CNY=X",
+    # Top US stocks (movers)
+    "NVIDIA":       "NVDA",
+    "Apple":        "AAPL",
+    "Microsoft":    "MSFT",
+    "Amazon":       "AMZN",
+    "Alphabet":     "GOOGL",
+    "Meta":         "META",
+    "Tesla":        "TSLA",
+    "Berkshire":    "BRK-B",
 }
 
 
-def _fetch_market_sync() -> list[dict]:
+def _fetch_one(name: str, sym: str) -> dict | None:
     import yfinance as yf
     import math
-    result = []
-    for name, sym in _TICKERS.items():
-        try:
-            info = yf.Ticker(sym).fast_info
-            price = info.last_price or 0
-            prev = info.regular_market_previous_close or price
-            change = ((price - prev) / prev * 100) if prev else 0
-            price = 0 if math.isnan(price) or math.isinf(price) else price
-            change = 0 if math.isnan(change) or math.isinf(change) else change
-            if price > 0:
-                result.append({"name": name, "price": round(price, 4), "change": round(change, 2)})
-        except Exception:
-            pass
-    return result
+    try:
+        info = yf.Ticker(sym).fast_info
+        price = info.last_price or 0
+        prev = info.regular_market_previous_close or price
+        change = ((price - prev) / prev * 100) if prev else 0
+        price = 0 if math.isnan(price) or math.isinf(price) else price
+        change = 0 if math.isnan(change) or math.isinf(change) else change
+        if price > 0:
+            return {"name": name, "price": round(price, 4), "change": round(change, 2)}
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_market_sync() -> list[dict]:
+    """Fetch all tickers in parallel — cuts cold-start from ~12s to ~2s. Preserves _TICKERS order."""
+    from concurrent.futures import ThreadPoolExecutor
+    items = list(_TICKERS.items())
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        fetched = list(ex.map(lambda kv: _fetch_one(*kv), items))
+    return [r for r in fetched if r]
 
 
 async def get_market_data() -> list[dict]:
@@ -63,15 +88,26 @@ async def get_market_data() -> list[dict]:
         return _MARKET_CACHE.get("data", [])
 
     loop = asyncio.get_event_loop()
-    try:
-        result = await loop.run_in_executor(None, _fetch_market_sync)
-    except Exception:
-        result = _MARKET_CACHE.get("data", [])
+    have_cache = bool(_MARKET_CACHE.get("data"))
+    # На холодном старте Yahoo иногда отдаёт пусто (нужен crumb/throttle) —
+    # ретраим с паузой. Если кэш уже есть, не упорствуем (фронт обновится позже).
+    attempts = 1 if have_cache else 4
+    result = []
+    for i in range(attempts):
+        try:
+            result = await loop.run_in_executor(None, _fetch_market_sync)
+        except Exception:
+            result = []
+        if result:
+            break
+        if i < attempts - 1:
+            await asyncio.sleep(2 * (i + 1))
 
     if result:
         _MARKET_CACHE["data"] = result
         _MARKET_CACHE["ts"] = now
-    return result
+        return result
+    return _MARKET_CACHE.get("data", [])
 
 
 # ── Bloomberg RSS feeds ───────────────────────────────────────────────────────
@@ -138,8 +174,13 @@ async def get_news() -> list[dict]:
     return articles
 
 
-async def get_translated_news(lang: str = "ru") -> list[dict]:
-    """Fetch news and translate titles + descriptions."""
+_TNEWS_CACHE: dict = {"data": [], "ts": 0}
+_TNEWS_TTL = 300            # переведённые новости держим 5 мин
+_tnews_refreshing = False   # защита от параллельных перекачек
+
+
+async def _build_translated_news(lang: str) -> list[dict]:
+    """Тяжёлая часть: перевод заголовков и описаний батчами."""
     import translator as tr
     import text_nodes as tn
 
@@ -147,7 +188,6 @@ async def get_translated_news(lang: str = "ru") -> list[dict]:
     if not articles:
         return []
 
-    # Batch translate all titles + descs together
     nodes = []
     for i, a in enumerate(articles):
         nodes.append({"id": f"t{i}", "text": a["title"]})
@@ -165,3 +205,51 @@ async def get_translated_news(lang: str = "ru") -> list[dict]:
             "desc_ru": translations.get(f"d{i}", a.get("desc", "")),
         })
     return result
+
+
+async def get_translated_news(lang: str = "ru") -> list[dict]:
+    """
+    Stale-while-revalidate: НИКОГДА не блокирует запрос на перевод.
+    - свежий кэш → отдаём сразу
+    - устаревший кэш → отдаём старое, перевод обновляем в фоне
+    - пустой кэш (только первый раз) → переводим синхронно
+    """
+    global _tnews_refreshing
+    now = time.time()
+    fresh = _TNEWS_CACHE["ts"] + _TNEWS_TTL > now
+    have = bool(_TNEWS_CACHE["data"])
+
+    if have and fresh:
+        return _TNEWS_CACHE["data"]
+
+    if have and not fresh:
+        # отдаём stale, обновляем в фоне (один раз)
+        if not _tnews_refreshing:
+            _tnews_refreshing = True
+
+            async def _refresh():
+                global _tnews_refreshing
+                try:
+                    data = await _build_translated_news(lang)
+                    if data:
+                        _TNEWS_CACHE["data"] = data
+                        _TNEWS_CACHE["ts"] = time.time()
+                finally:
+                    _tnews_refreshing = False
+
+            asyncio.create_task(_refresh())
+        return _TNEWS_CACHE["data"]
+
+    # кэша нет вообще — строим под локом, чтобы конкурентные запросы не дублировали работу
+    lock = _TNEWS_CACHE.setdefault("lock", asyncio.Lock())
+    if lock.locked():
+        # кто-то уже строит — не блокируемся, отдаём что есть (страница уже отрендерена сервером)
+        return _TNEWS_CACHE["data"]
+    async with lock:
+        if _TNEWS_CACHE["data"] and _TNEWS_CACHE["ts"] + _TNEWS_TTL > time.time():
+            return _TNEWS_CACHE["data"]
+        data = await _build_translated_news(lang)
+        if data:
+            _TNEWS_CACHE["data"] = data
+            _TNEWS_CACHE["ts"] = time.time()
+        return data
