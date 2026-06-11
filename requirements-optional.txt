@@ -1,0 +1,7 @@
+# Необязательные тяжёлые зависимости — сайт работает и без них.
+# faster-whisper — живая озвучка Bloomberg TV на русском
+# yt-dlp        — получение потока Bloomberg TV
+# playwright    — полные статьи Bloomberg (после установки: playwright install chromium)
+faster-whisper==1.2.1
+yt-dlp>=2025.1.1
+playwright>=1.40.0

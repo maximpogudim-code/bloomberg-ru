@@ -10,24 +10,45 @@ echo "  Bloomberg Terminal на русском — запуск"
 echo "============================================"
 echo ""
 
-# ── 1. Проверяем python3 ──────────────────────────────────────────────────
-if ! command -v python3 &>/dev/null; then
-    echo "ОШИБКА: Python не найден на этом компьютере."
+# ── 1. Ищем Python 3.10 или новее ────────────────────────────────────────
+# Системный python3 на macOS часто старый (3.9) — он не подходит.
+PYTHON=""
+for CAND in python3.13 python3.12 python3.11 python3.10 \
+            /usr/local/bin/python3 /opt/homebrew/bin/python3 \
+            /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
+            /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
+            /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
+            /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \
+            python3; do
+    P=$(command -v "$CAND" 2>/dev/null) || continue
+    if "$P" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+        PYTHON="$P"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    echo "ОШИБКА: нужен Python версии 3.10 или новее."
     echo ""
     echo "Пожалуйста, установите Python:"
     echo "  1. Откройте браузер и перейдите на https://python.org/downloads"
-    echo "  2. Скачайте и установите Python 3 (зелёная кнопка)"
+    echo "  2. Скачайте и установите Python 3 (жёлтая кнопка Download)"
     echo "  3. После установки снова двойной клик на START.command"
     echo ""
     read -p "Нажмите Enter, чтобы закрыть это окно..."
     exit 1
 fi
 
-PYTHON=$(command -v python3)
-echo "Python найден: $PYTHON"
+echo "Python найден: $PYTHON ($("$PYTHON" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))'))"
 echo ""
 
-# ── 2. Создаём виртуальное окружение, если нет ───────────────────────────
+# ── 2. Создаём виртуальное окружение, если нет или оно сломано ───────────
+# Если прошлая установка оборвалась — начинаем заново.
+if [ -d ".venv" ] && [ ! -x ".venv/bin/uvicorn" ]; then
+    echo "Прошлая установка не завершилась — начинаем заново..."
+    rm -rf .venv
+fi
+
 if [ ! -d ".venv" ]; then
     echo "Первый запуск — устанавливаем программы..."
     echo "(Это займёт 5–10 минут, один раз)"
@@ -47,12 +68,18 @@ if [ ! -d ".venv" ]; then
         exit 1
     fi
     echo ""
+    echo "Устанавливаем дополнительные компоненты (ТВ-озвучка, полные статьи)..."
+    echo "(Если эта часть не установится — сайт всё равно будет работать)"
+    .venv/bin/pip install -r requirements-optional.txt || true
+    echo ""
     echo "Установка завершена!"
 fi
 
 # ── 3. Playwright (best-effort, не падаем при ошибке) ────────────────────
 if .venv/bin/python -c "import playwright" &>/dev/null; then
-    echo "Устанавливаем Chromium для полных статей (~150 МБ, один раз)..."
+    if [ ! -d "$HOME/Library/Caches/ms-playwright" ]; then
+        echo "Устанавливаем Chromium для полных статей (~150 МБ, один раз)..."
+    fi
     .venv/bin/playwright install chromium 2>/dev/null || true
 fi
 

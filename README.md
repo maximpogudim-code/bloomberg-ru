@@ -34,9 +34,13 @@ Bloomberg Terminal RU — это программа, которая показы
 
 ## Как запустить (Mac)
 
-**Шаг 1 — Убедитесь, что установлен Python**
+**Шаг 1 — Установите Python** (один раз)
 
-Обычно Python уже есть на Mac. Если нет — скачайте с [python.org/downloads](https://python.org/downloads) (кнопка «Download Python 3.x.x» для macOS).
+Встроенный в Mac Python обычно слишком старый, поэтому установите свежий:
+
+1. Откройте браузер и перейдите на [python.org/downloads](https://python.org/downloads)
+2. Нажмите жёлтую кнопку «Download Python 3.x.x»
+3. Откройте скачанный файл и установите, нажимая «Продолжить»
 
 **Шаг 2 — Скачайте программу**
 
@@ -60,6 +64,9 @@ Bloomberg Terminal RU — это программа, которая показы
 
 **Браузер не открылся автоматически**
 Откройте браузер вручную и введите в адресной строке: `http://localhost:8080`
+
+**«Нужен Python версии 3.10 или новее»**
+На компьютере установлен устаревший Python. Установите свежий с [python.org/downloads](https://python.org/downloads) и запустите START снова.
 
 **На Windows: «Python не найден»**
 При установке Python не была поставлена галочка «Add Python to PATH». Удалите Python через «Программы и компоненты» и установите заново, не забыв про галочку. Либо перезагрузите компьютер после установки.
@@ -128,7 +135,8 @@ CACHE_TEXT_TTL=3600            # Кэш текстов (сек), по умолч
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-playwright install chromium        # Необязательно, для полных статей
+pip install -r requirements-optional.txt   # Необязательно: ТВ-озвучка, полные статьи
+playwright install chromium                # Необязательно, для полных статей
 uvicorn app:app --host 127.0.0.1 --port 8080 --reload
 ```
 

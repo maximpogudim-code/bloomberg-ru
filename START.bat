@@ -45,13 +45,32 @@ pause
 exit /b 1
 
 :python_found
+:: Проверяем, что Python не старше 3.10
+%PYTHON_CMD% -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo ОШИБКА: установлен слишком старый Python — нужна версия 3.10 или новее.
+    echo.
+    echo Пожалуйста, установите свежий Python:
+    echo   1. Откройте браузер и перейдите на https://python.org/downloads
+    echo   2. Скачайте Python 3 и запустите установщик
+    echo   3. ВАЖНО: поставьте галочку "Add Python to PATH" при установке!
+    echo   4. Снова двойной клик на START.bat
+    echo.
+    pause
+    exit /b 1
+)
 echo Python найден (%PYTHON_CMD%)
 echo.
 
 :: Переходим в папку скрипта
 cd /d "%~dp0"
 
-:: ── 2. Создаём виртуальное окружение, если нет ──────────────────────────
+:: ── 2. Создаём виртуальное окружение, если нет или оно сломано ──────────
+if exist ".venv\" if not exist ".venv\Scripts\uvicorn.exe" (
+    echo Прошлая установка не завершилась — начинаем заново...
+    rmdir /s /q .venv
+)
+
 if not exist ".venv\" (
     echo Первый запуск — устанавливаем программы...
     echo Это займёт 5–10 минут, один раз.
@@ -70,6 +89,9 @@ if not exist ".venv\" (
         pause
         exit /b 1
     )
+    echo.
+    echo Устанавливаем дополнительные компоненты — если не получится, сайт всё равно заработает...
+    .venv\Scripts\pip install -r requirements-optional.txt
     echo.
     echo Установка завершена!
     echo.
