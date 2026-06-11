@@ -858,13 +858,22 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
 .panel-title{{font-size:9px;font-weight:900;letter-spacing:2px;color:var(--amber);text-transform:uppercase}}
 
 /* MAIN GRID */
-.main{{display:grid;grid-template-columns:370px 1fr 255px;gap:8px;padding:8px;align-items:start}}
+.main{{display:grid;grid-template-columns:445px 1fr 255px;gap:8px;padding:8px;align-items:start}}
 
 /* TV PANEL */
 .tv-panel{{display:flex;flex-direction:column;background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden}}
 .tv-wrap{{position:relative;padding-top:56.25%;background:#000;flex-shrink:0}}
 .tv-wrap video{{position:absolute;top:0;left:0;width:100%;height:100%;border:0;background:#000}}
 .tr-panel{{display:flex;flex-direction:column;max-height:240px}}
+.metals-hdr{{display:flex;align-items:center;gap:6px;padding:7px 12px;border-top:1px solid var(--bd);border-bottom:1px solid var(--bd);background:rgba(245,158,11,.04);font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--amber)}}
+.metals-wrap{{position:relative;padding-top:56.25%;background:var(--sf);flex-shrink:0}}
+.metals-inner{{position:absolute;top:0;left:0;width:100%;height:100%;display:flex;gap:1px;background:var(--bd)}}
+.metal-box{{flex:1;display:flex;flex-direction:column;background:var(--sf);min-width:0}}
+.metal-top{{display:flex;align-items:baseline;gap:7px;padding:6px 10px 2px;flex-wrap:wrap}}
+.metal-name{{font-size:12px;font-weight:700}}
+.metal-price{{font-family:var(--mono);font-size:13px;font-weight:700}}
+.metal-chg{{font-family:var(--mono);font-size:11px;font-weight:600}}
+.metal-chart{{flex:1;min-height:0}}
 .tr-header{{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid var(--bd);border-top:1px solid var(--bd);font-size:9px;font-weight:800;color:var(--muted);letter-spacing:1px;text-transform:uppercase}}
 .tr-live{{color:var(--green);animation:blink 2s ease-in-out infinite}}
 .tr-body{{flex:1;overflow-y:auto;padding:8px 12px;display:flex;flex-direction:column;gap:4px;scrollbar-width:thin;scrollbar-color:var(--bd) transparent}}
@@ -966,7 +975,7 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
 .nc-empty{{color:var(--muted);text-align:center;padding:40px;font-size:12px}}
 
 /* RESPONSIVE */
-@media(max-width:1200px){{.main{{grid-template-columns:330px 1fr 235px}}}}
+@media(max-width:1200px){{.main{{grid-template-columns:395px 1fr 235px}}}}
 @media(max-width:960px){{
   .main{{grid-template-columns:1fr}}
   .bottom{{grid-template-columns:1fr}}
@@ -1018,6 +1027,27 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
       <div class="tr-footer">
         <button class="dub-btn" id="dub-btn" onclick="toggleDubbing()">▶ Озвучка RU</button>
         <span class="tr-hint" id="tr-hint">Whisper + перевод · ≤5 сек задержки</span>
+      </div>
+    </div>
+    <div class="metals-hdr"><span class="live-dot"></span> Драгметаллы · Лондон/COMEX · live</div>
+    <div class="metals-wrap">
+      <div class="metals-inner">
+        <div class="metal-box">
+          <div class="metal-top">
+            <span class="metal-name" style="color:#e6a817">Золото</span>
+            <span class="metal-price" id="au-price">—</span>
+            <span class="metal-chg" id="au-chg"></span>
+          </div>
+          <div class="metal-chart" id="au-chart"></div>
+        </div>
+        <div class="metal-box">
+          <div class="metal-top">
+            <span class="metal-name" style="color:#c0c4cc">Серебро</span>
+            <span class="metal-price" id="ag-price">—</span>
+            <span class="metal-chg" id="ag-chg"></span>
+          </div>
+          <div class="metal-chart" id="ag-chart"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -1442,6 +1472,65 @@ function initChart(){{
   }});
   ro.observe(c);
   loadChartData('SPY','1mo','1d');
+  initMetals();
+}}
+
+// LIVE METALS (Gold / Silver) — мини-графики под видео
+var _metals={{
+  au:{{sym:'GC=F',chart:null,series:null,color:'#e6a817'}},
+  ag:{{sym:'SI=F',chart:null,series:null,color:'#c0c4cc'}}
+}};
+function initMetals(){{
+  Object.keys(_metals).forEach(function(k){{
+    var m=_metals[k],el=document.getElementById(k+'-chart');
+    if(!el)return;
+    m.chart=LightweightCharts.createChart(el,{{
+      layout:{{background:{{color:'transparent'}},textColor:'#4a6080',fontSize:9}},
+      grid:{{vertLines:{{visible:false}},horzLines:{{color:'rgba(74,96,128,.12)'}}}},
+      rightPriceScale:{{borderVisible:false}},
+      timeScale:{{borderVisible:false,timeVisible:true,secondsVisible:false}},
+      crosshair:{{mode:0}},handleScroll:false,handleScale:false
+    }});
+    m.series=m.chart.addAreaSeries({{
+      lineColor:m.color,lineWidth:2,
+      topColor:m.color+'44',bottomColor:m.color+'05',
+      priceLineVisible:true,lastValueVisible:true
+    }});
+    var ro=new ResizeObserver(function(es){{
+      for(var e of es)m.chart.resize(e.contentRect.width,e.contentRect.height);
+    }});
+    ro.observe(el);
+  }});
+  refreshMetalCharts();refreshMetalQuotes();
+  setInterval(refreshMetalCharts,120000);
+  setInterval(refreshMetalQuotes,15000);
+}}
+function refreshMetalCharts(){{
+  Object.keys(_metals).forEach(function(k){{
+    var m=_metals[k];if(!m.series)return;
+    fetch('/api/ohlcv?symbol='+encodeURIComponent(m.sym)+'&period=1d&interval=5m')
+      .then(r=>r.json()).then(function(d){{
+        if(!d||!d.length)return;
+        m.series.setData(d.map(function(x){{return {{time:x.time,value:x.close}};}}));
+        m.chart.timeScale().fitContent();
+      }}).catch(function(){{}});
+  }});
+}}
+function refreshMetalQuotes(){{
+  Object.keys(_metals).forEach(function(k){{
+    var m=_metals[k];
+    fetch('/api/quote?symbol='+encodeURIComponent(m.sym))
+      .then(r=>r.json()).then(function(q){{
+        if(!q||q.price==null)return;
+        var p=document.getElementById(k+'-price'),c=document.getElementById(k+'-chg');
+        if(p)p.textContent='$'+q.price.toFixed(2);
+        if(c&&q.prev){{
+          var ch=(q.price-q.prev)/q.prev*100;
+          c.textContent=(ch>=0?'+':'')+ch.toFixed(2)+'%';
+          c.style.color=ch>=0?'#22d47a':'#ff4466';
+        }}
+      }}).catch(function(){{}});
+  }});
 }}
 
 function applyIndicators(){{
