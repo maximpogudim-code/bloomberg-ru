@@ -11,3 +11,4 @@ _backups/
 .DS_Store
 *.zip
 tests/__pycache__/
+cookies.txt

@@ -452,12 +452,20 @@ async def _get_upstream_hls() -> str:
             if os.path.exists(os.path.join(os.path.dirname(__file__), ".venv", "bin", "yt-dlp"))
             else shutil.which("yt-dlp") or "yt-dlp"
         )
-        result = subprocess.run(
-            [ytdlp, "--no-warnings", "--get-url", f"https://www.youtube.com/watch?v={vid}"],
-            capture_output=True, text=True, timeout=40,
-        )
-        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip() and "manifest" in l]
-        return lines[0] if lines else None
+        base = [ytdlp, "--no-warnings", "--get-url", f"https://www.youtube.com/watch?v={vid}"]
+        cookies = os.path.join(os.path.dirname(__file__), "cookies.txt")
+        attempts = [base, base + ["--extractor-args", "youtube:player_client=tv"]]
+        if os.path.isfile(cookies):
+            attempts.append(base + ["--cookies", cookies])
+        for cmd in attempts:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+            except Exception:
+                continue
+            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip() and "manifest" in l]
+            if lines:
+                return lines[0]
+        return None
 
     loop = asyncio.get_event_loop()
     url = await loop.run_in_executor(None, _fetch)
@@ -1672,18 +1680,33 @@ function _syncSelect(sym){{
   var sc=document.createElement('script');
   sc.src='https://cdn.jsdelivr.net/npm/hls.js@latest';
   sc.onload=function(){{
+    // Запасной плеер: официальный YouTube-iframe — играет с IP зрителя,
+    // работает даже когда серверный yt-dlp заблокирован бот-проверкой YouTube.
+    function tvFallback(){{
+      if(window._tvIframeDone)return;window._tvIframeDone=true;
+      fetch('/api/live-id').then(r=>r.json()).then(function(d){{
+        if(!d.id)return;
+        var w=document.querySelector('.tv-wrap');if(!w)return;
+        w.innerHTML='<iframe src="https://www.youtube.com/embed/'+d.id
+          +'?autoplay=1&mute=1&playsinline=1&hl=ru" '
+          +'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
+          +'allow="autoplay;encrypted-media;picture-in-picture" allowfullscreen></iframe>';
+      }}).catch(function(){{}});
+    }}
     fetch('/api/live-hls').then(r=>r.json()).then(function(d){{
-      if(!d.url)return;
+      if(!d.url){{tvFallback();return;}}
       var v=document.getElementById('bloomberg-video');
       if(Hls.isSupported()){{
         var hls=new Hls({{enableWorker:true,lowLatencyMode:true}});
         hls.loadSource(d.url);hls.attachMedia(v);
         hls.on(Hls.Events.MANIFEST_PARSED,function(){{v.play().catch(function(){{}});}});
+        hls.on(Hls.Events.ERROR,function(ev,data){{if(data&&data.fatal)tvFallback();}});
       }}else if(v.canPlayType('application/vnd.apple.mpegurl')){{
         v.src=d.url;
         v.addEventListener('loadedmetadata',function(){{v.play().catch(function(){{}});}});
-      }}
-    }}).catch(function(){{}});
+        v.addEventListener('error',function(){{tvFallback();}});
+      }}else{{tvFallback();}}
+    }}).catch(function(){{tvFallback();}});
   }};
   document.head.appendChild(sc);
 }})();

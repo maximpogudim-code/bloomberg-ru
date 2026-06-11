@@ -190,15 +190,23 @@ async def _get_stream_url(video_id: str) -> str | None:
 
     def _fetch():
         import subprocess
-        result = subprocess.run(
-            [
-                _YT_DLP, "--no-warnings", "-f", "bestaudio/worst",
-                "--get-url", f"https://www.youtube.com/watch?v={video_id}",
-            ],
-            capture_output=True, text=True, timeout=40,
-        )
-        lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
-        return lines[0] if lines else None
+        base = [
+            _YT_DLP, "--no-warnings", "-f", "bestaudio/worst",
+            "--get-url", f"https://www.youtube.com/watch?v={video_id}",
+        ]
+        cookies = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+        attempts = [base, base + ["--extractor-args", "youtube:player_client=tv"]]
+        if os.path.isfile(cookies):
+            attempts.append(base + ["--cookies", cookies])
+        for cmd in attempts:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+            except Exception:
+                continue
+            lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
+            if lines:
+                return lines[0]
+        return None
 
     url = await loop.run_in_executor(None, _fetch)
     if url:
