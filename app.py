@@ -1002,23 +1002,23 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
 
 /* ── Светлая тема в стиле goldapple: белый фон, чёрная типографика, минимализм ── */
 html[data-theme="light"]{{
-  --bg:#ffffff;--sf:#ffffff;--sf2:#f6f6f4;--bd:#e9e9e7;
-  --amber:#111111;--amber2:#3a3a3a;
-  --green:#0a8f4d;--red:#d61f3d;
-  --text:#111111;--muted:#9b9b98;--dim:#f0f0ee;
+  --bg:#d4d5d1;--sf:#e4e5e1;--sf2:#dcddd9;--bd:#c2c3bf;
+  --amber:#1c1c1c;--amber2:#3a3a3a;
+  --green:#0a7a44;--red:#c01f38;
+  --text:#1c1c1c;--muted:#7e7e7a;--dim:#cdcec9;
 }}
 html[data-theme="light"] body{{font-family:'Helvetica Neue',Inter,Arial,-apple-system,sans-serif}}
-html[data-theme="light"] .hdr{{background:#ffffff;border-bottom:1px solid #111}}
+html[data-theme="light"] .hdr{{background:#d4d5d1;border-bottom:1px solid #1c1c1c}}
 html[data-theme="light"] .logo{{color:#111;text-transform:lowercase;letter-spacing:-.5px;font-weight:800}}
 html[data-theme="light"] .logo-b{{color:#111}}
 html[data-theme="light"] .logo-ru{{background:#111;color:#fff;border-radius:0}}
-html[data-theme="light"] .panel-hdr,html[data-theme="light"] .metals-hdr,html[data-theme="light"] .calc-panel,html[data-theme="light"] .chart-controls{{background:#fafaf8}}
+html[data-theme="light"] .panel-hdr,html[data-theme="light"] .metals-hdr,html[data-theme="light"] .calc-panel,html[data-theme="light"] .chart-controls{{background:#dcddd9}}
 html[data-theme="light"] .panel-title,html[data-theme="light"] .metals-hdr,html[data-theme="light"] .calc-title,html[data-theme="light"] .mkt-group,html[data-theme="light"] .nc-group{{text-transform:lowercase;letter-spacing:.02em}}
 html[data-theme="light"] .sym-go{{background:#111;color:#fff}}
 html[data-theme="light"] .dub-btn{{background:#111;color:#fff}}
 html[data-theme="light"] .pbtn.active{{background:#111;color:#fff;border-color:#111}}
-html[data-theme="light"] .hdr-item:hover{{background:#f3f3f1}}
-html[data-theme="light"] .tv-wrap{{background:#f0f0ee}}
+html[data-theme="light"] .hdr-item:hover{{background:#cdcec9}}
+html[data-theme="light"] .tv-wrap{{background:#c8c9c5}}
 .theme-btn{{background:none;border:1px solid var(--bd);border-radius:12px;color:var(--muted);font-size:10px;padding:3px 10px;cursor:pointer;letter-spacing:.05em}}
 .theme-btn:hover{{border-color:var(--amber);color:var(--text)}}
 .hdr-clocks{{display:flex;gap:12px;align-items:center}}
@@ -1524,7 +1524,7 @@ function sma(data,n){{
 }}
 
 var _LIGHT=(document.documentElement.getAttribute('data-theme')||'light')==='light';
-var _CH={{bg:_LIGHT?'#ffffff':'#0c1624',txt:_LIGHT?'#9b9b98':'#4a6080',grid:_LIGHT?'#efefed':'#1a2840',cross:_LIGHT?'#111111':'#f59e0b'}};
+var _CH={{bg:_LIGHT?'#e4e5e1':'#0c1624',txt:_LIGHT?'#7e7e7a':'#4a6080',grid:_LIGHT?'#d0d1cd':'#1a2840',cross:_LIGHT?'#1c1c1c':'#f59e0b'}};
 function initChart(){{
   var c=document.getElementById('chart-container');
   _chart=LightweightCharts.createChart(c,{{
