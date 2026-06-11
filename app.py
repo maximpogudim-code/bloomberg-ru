@@ -878,6 +878,10 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
 /* CHART PANEL */
 .chart-panel{{display:flex;flex-direction:column;background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden}}
 .chart-controls{{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--bd);flex-wrap:wrap;background:rgba(245,158,11,.03)}}
+.sym-select{{background:var(--bg);border:1px solid var(--bd);border-radius:5px;color:var(--text);font-size:12px;padding:5px 7px;font-family:var(--mono);outline:none;cursor:pointer;max-width:190px}}
+.sym-select:hover{{border-color:var(--amber)}}
+.sym-select optgroup{{color:var(--amber);font-style:normal}}
+.sym-select option{{color:var(--text);background:var(--bg)}}
 .sym-wrap{{display:flex;align-items:center;border:1px solid var(--bd);border-radius:5px;overflow:hidden;background:var(--bg)}}
 .sym-input{{background:none;border:none;color:var(--text);font-size:12px;padding:5px 9px;width:175px;font-family:var(--mono);outline:none}}
 .sym-input::placeholder{{color:var(--muted)}}
@@ -1021,9 +1025,52 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
   <!-- CENTER: Interactive Chart -->
   <div class="chart-panel">
     <div class="chart-controls">
+      <select id="sym-select" class="sym-select" onchange="pickSym()" title="Выбор инструмента">
+        <option value="">— Выбрать инструмент —</option>
+        <optgroup label="Индексы">
+          <option value="^GSPC">S&amp;P 500</option>
+          <option value="^IXIC">NASDAQ</option>
+          <option value="^DJI">Dow Jones</option>
+          <option value="^FTSE">FTSE 100</option>
+          <option value="^GDAXI">DAX</option>
+          <option value="^N225">Nikkei 225</option>
+          <option value="DX-Y.NYB">Индекс доллара (DXY)</option>
+        </optgroup>
+        <optgroup label="Драгметаллы">
+          <option value="GC=F">Золото</option>
+          <option value="SI=F">Серебро</option>
+          <option value="PL=F">Платина</option>
+          <option value="PA=F">Палладий</option>
+        </optgroup>
+        <optgroup label="Сырьё">
+          <option value="BZ=F">Нефть Brent</option>
+          <option value="CL=F">Нефть WTI</option>
+          <option value="NG=F">Природный газ</option>
+          <option value="HG=F">Медь</option>
+          <option value="ZW=F">Пшеница</option>
+          <option value="ZC=F">Кукуруза</option>
+          <option value="ZS=F">Соя</option>
+          <option value="SB=F">Сахар</option>
+          <option value="KC=F">Кофе</option>
+          <option value="CC=F">Какао</option>
+          <option value="CT=F">Хлопок</option>
+        </optgroup>
+        <optgroup label="Валюты">
+          <option value="EURUSD=X">EUR/USD</option>
+          <option value="GBPUSD=X">GBP/USD</option>
+          <option value="JPY=X">USD/JPY</option>
+          <option value="CHF=X">USD/CHF</option>
+          <option value="CAD=X">USD/CAD</option>
+          <option value="AUDUSD=X">AUD/USD</option>
+          <option value="RUB=X">USD/RUB</option>
+          <option value="CNY=X">USD/CNY</option>
+          <option value="TRY=X">USD/TRY</option>
+          <option value="INR=X">USD/INR</option>
+        </optgroup>
+      </select>
       <div class="sym-wrap">
         <input type="text" id="sym-input" class="sym-input" value="SPY"
-               placeholder="SPY, NVDA, BTC-USD, GC=F..."
+               placeholder="свой тикер: NVDA, AAPL..."
                onkeydown="if(event.key==='Enter')loadChart()">
         <button class="sym-go" onclick="loadChart()">→</button>
       </div>
@@ -1315,6 +1362,7 @@ function clickMkt(name){{
   _curSym=sym;
   document.getElementById('sym-input').value=sym;
   document.getElementById('ci-sym').textContent=name+' ('+sym+')';
+  _syncSelect(sym);
   loadChartData(sym,_curPeriod,_curInterval);
 }}
 
@@ -1495,7 +1543,27 @@ function loadChart(){{
   if(!v)return;
   _curSym=v;
   document.getElementById('ci-sym').textContent=v;
+  _syncSelect(v);
   loadChartData(v,_curPeriod,_curInterval);
+}}
+
+function pickSym(){{
+  var sel=document.getElementById('sym-select');
+  var sym=sel.value;
+  if(!sym)return;
+  var name=sel.options[sel.selectedIndex].text;
+  _curSym=sym;
+  document.getElementById('sym-input').value=sym;
+  document.getElementById('ci-sym').textContent=name+' ('+sym+')';
+  loadChartData(sym,_curPeriod,_curInterval);
+}}
+
+function _syncSelect(sym){{
+  var sel=document.getElementById('sym-select');if(!sel)return;
+  for(var i=0;i<sel.options.length;i++){{
+    if(sel.options[i].value===sym){{sel.selectedIndex=i;return;}}
+  }}
+  sel.selectedIndex=0;
 }}
 
 // Load Lightweight Charts from CDN
