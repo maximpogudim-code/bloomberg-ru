@@ -1680,33 +1680,34 @@ function _syncSelect(sym){{
   var sc=document.createElement('script');
   sc.src='https://cdn.jsdelivr.net/npm/hls.js@latest';
   sc.onload=function(){{
-    // Запасной плеер: официальный YouTube-iframe — играет с IP зрителя,
-    // работает даже когда серверный yt-dlp заблокирован бот-проверкой YouTube.
-    function tvFallback(){{
-      if(window._tvIframeDone)return;window._tvIframeDone=true;
-      fetch('/api/live-id').then(r=>r.json()).then(function(d){{
-        if(!d.id)return;
-        var w=document.querySelector('.tv-wrap');if(!w)return;
-        w.innerHTML='<iframe src="https://www.youtube.com/embed/'+d.id
-          +'?autoplay=1&mute=1&playsinline=1&hl=ru" '
-          +'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
-          +'allow="autoplay;encrypted-media;picture-in-picture" allowfullscreen></iframe>';
-      }}).catch(function(){{}});
-    }}
-    fetch('/api/live-hls').then(r=>r.json()).then(function(d){{
-      if(!d.url){{tvFallback();return;}}
-      var v=document.getElementById('bloomberg-video');
+    // Родной плеер с самовосстановлением: пока поток недоступен —
+    // проверяем каждые 20 сек и запускаем, как только он появится.
+    var _tvHls=null,_tvTimer=null;
+    function tvStart(url){{
+      var v=document.getElementById('bloomberg-video');if(!v)return;
       if(Hls.isSupported()){{
-        var hls=new Hls({{enableWorker:true,lowLatencyMode:true}});
-        hls.loadSource(d.url);hls.attachMedia(v);
-        hls.on(Hls.Events.MANIFEST_PARSED,function(){{v.play().catch(function(){{}});}});
-        hls.on(Hls.Events.ERROR,function(ev,data){{if(data&&data.fatal)tvFallback();}});
+        if(_tvHls){{try{{_tvHls.destroy();}}catch(e){{}}}}
+        _tvHls=new Hls({{enableWorker:true,lowLatencyMode:true}});
+        _tvHls.loadSource(url);_tvHls.attachMedia(v);
+        _tvHls.on(Hls.Events.MANIFEST_PARSED,function(){{v.play().catch(function(){{}});}});
+        _tvHls.on(Hls.Events.ERROR,function(ev,data){{
+          if(data&&data.fatal){{try{{_tvHls.destroy();}}catch(e){{}}_tvHls=null;tvPoll(30000);}}
+        }});
       }}else if(v.canPlayType('application/vnd.apple.mpegurl')){{
-        v.src=d.url;
+        v.src=url;
         v.addEventListener('loadedmetadata',function(){{v.play().catch(function(){{}});}});
-        v.addEventListener('error',function(){{tvFallback();}});
-      }}else{{tvFallback();}}
-    }}).catch(function(){{tvFallback();}});
+        v.addEventListener('error',function(){{tvPoll(30000);}});
+      }}
+    }}
+    function tvPoll(delay){{
+      if(_tvTimer)clearTimeout(_tvTimer);
+      _tvTimer=setTimeout(function(){{
+        fetch('/api/live-hls').then(r=>r.json()).then(function(d){{
+          if(d.url){{tvStart(d.url);}}else{{tvPoll(20000);}}
+        }}).catch(function(){{tvPoll(20000);}});
+      }},delay);
+    }}
+    tvPoll(0);
   }};
   document.head.appendChild(sc);
 }})();
