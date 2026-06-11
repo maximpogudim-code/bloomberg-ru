@@ -1533,15 +1533,42 @@ function loadChart(){{
 
 // RUSSIAN DUBBING
 var _dubES=null,_dubActive=false,_tts=window.speechSynthesis,_ruVoice=null;
+var _ttsQueue=[],_speaking=false,_lastAdded='',_chromeFix=null;
 function _loadVoices(){{_ruVoice=_tts.getVoices().find(v=>v.lang.startsWith('ru'));}}
 if(_tts.onvoiceschanged!==undefined)_tts.onvoiceschanged=_loadVoices;
 _loadVoices();
-function _speakRu(text){{
-  if(!text||!_tts)return;_tts.cancel();
+
+function _pump(){{
+  if(_speaking||_ttsQueue.length===0)return;
+  _speaking=true;
+  var text=_ttsQueue.shift();
   var u=new SpeechSynthesisUtterance(text);
   u.lang='ru-RU';u.rate=1.05;if(_ruVoice)u.voice=_ruVoice;
+  u.onend=function(){{_speaking=false;_pump();}};
+  u.onerror=function(){{_speaking=false;_pump();}};
   _tts.speak(u);
 }}
+
+function _speakRu(text){{
+  if(!text||!_tts)return;
+  if(text===_lastAdded)return;
+  _lastAdded=text;
+  _ttsQueue.push(text);
+  if(_ttsQueue.length>2)_ttsQueue.splice(0,_ttsQueue.length-2);
+  _pump();
+}}
+
+function _updateHint(){{
+  var hint=document.getElementById('tr-hint');
+  if(!hint||!_dubActive)return;
+  var q=_ttsQueue.length;
+  if(q>0){{
+    hint.textContent='Активно · в очереди: '+q+' · '+new Date().toLocaleTimeString('ru-RU');
+  }}else{{
+    hint.textContent='Активно · '+new Date().toLocaleTimeString('ru-RU');
+  }}
+}}
+
 function _addLine(text){{
   var body=document.getElementById('tr-body');if(!body)return;
   var dim=body.querySelector('.tr-dim');if(dim)dim.remove();
@@ -1550,10 +1577,13 @@ function _addLine(text){{
   while(body.children.length>12)body.removeChild(body.firstChild);
   body.scrollTop=body.scrollHeight;
 }}
+
 function toggleDubbing(){{
   var btn=document.getElementById('dub-btn'),hint=document.getElementById('tr-hint');
   if(_dubActive){{
     if(_dubES){{_dubES.close();_dubES=null;}}
+    if(_chromeFix){{clearInterval(_chromeFix);_chromeFix=null;}}
+    _ttsQueue=[];_speaking=false;_lastAdded='';
     _tts.cancel();_dubActive=false;
     btn.textContent='▶ Озвучка RU';btn.classList.remove('active');
     if(hint)hint.textContent='Остановлено';
@@ -1561,11 +1591,14 @@ function toggleDubbing(){{
     _dubActive=true;
     btn.textContent='■ Стоп';btn.classList.add('active');
     if(hint)hint.textContent='Подключение... (~4 сек)';
+    _chromeFix=setInterval(function(){{
+      if(_tts.speaking){{_tts.pause();_tts.resume();}}
+    }},10000);
     _dubES=new EventSource('/api/live-transcript');
     _dubES.onmessage=function(e){{
       var d=JSON.parse(e.data);if(!d.text)return;
       _speakRu(d.text);_addLine(d.text);
-      if(hint)hint.textContent='Активно · '+new Date().toLocaleTimeString('ru-RU');
+      _updateHint();
     }};
     _dubES.onerror=function(){{if(hint)hint.textContent='Переподключение...';}} ;
   }}

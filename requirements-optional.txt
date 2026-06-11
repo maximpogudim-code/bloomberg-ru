@@ -5,3 +5,6 @@
 faster-whisper==1.2.1
 yt-dlp>=2025.1.1
 playwright>=1.40.0
+# imageio-ffmpeg — bundled ffmpeg binary; используется как фолбэк, если ffmpeg
+# не установлен ни в PATH, ни в ~/bin (lazy import в live_audio._resolve_ffmpeg)
+imageio-ffmpeg>=0.5
