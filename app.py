@@ -999,7 +999,35 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
   .bottom{{grid-template-columns:1fr}}
   .hdr-idx{{display:none}}
 }}
+
+/* ── Светлая тема в стиле goldapple: белый фон, чёрная типографика, минимализм ── */
+html[data-theme="light"]{{
+  --bg:#ffffff;--sf:#ffffff;--sf2:#f6f6f4;--bd:#e9e9e7;
+  --amber:#111111;--amber2:#3a3a3a;
+  --green:#0a8f4d;--red:#d61f3d;
+  --text:#111111;--muted:#9b9b98;--dim:#f0f0ee;
+}}
+html[data-theme="light"] body{{font-family:'Helvetica Neue',Inter,Arial,-apple-system,sans-serif}}
+html[data-theme="light"] .hdr{{background:#ffffff;border-bottom:1px solid #111}}
+html[data-theme="light"] .logo{{color:#111;text-transform:lowercase;letter-spacing:-.5px;font-weight:800}}
+html[data-theme="light"] .logo-b{{color:#111}}
+html[data-theme="light"] .logo-ru{{background:#111;color:#fff;border-radius:0}}
+html[data-theme="light"] .panel-hdr,html[data-theme="light"] .metals-hdr,html[data-theme="light"] .calc-panel,html[data-theme="light"] .chart-controls{{background:#fafaf8}}
+html[data-theme="light"] .panel-title,html[data-theme="light"] .metals-hdr,html[data-theme="light"] .calc-title,html[data-theme="light"] .mkt-group,html[data-theme="light"] .nc-group{{text-transform:lowercase;letter-spacing:.02em}}
+html[data-theme="light"] .sym-go{{background:#111;color:#fff}}
+html[data-theme="light"] .dub-btn{{background:#111;color:#fff}}
+html[data-theme="light"] .pbtn.active{{background:#111;color:#fff;border-color:#111}}
+html[data-theme="light"] .hdr-item:hover{{background:#f3f3f1}}
+html[data-theme="light"] .tv-wrap{{background:#f0f0ee}}
+.theme-btn{{background:none;border:1px solid var(--bd);border-radius:12px;color:var(--muted);font-size:10px;padding:3px 10px;cursor:pointer;letter-spacing:.05em}}
+.theme-btn:hover{{border-color:var(--amber);color:var(--text)}}
+.hdr-clocks{{display:flex;gap:12px;align-items:center}}
+.clk{{display:flex;flex-direction:column;align-items:center;line-height:1.15}}
+.clk-city{{font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700}}
+.clk-time{{font-family:var(--mono);font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}}
+@media(max-width:1200px){{.hdr-clocks .clk:nth-child(-n+2){{display:none}}}}
 </style>
+<script>document.documentElement.setAttribute('data-theme',localStorage.getItem('bb-theme')||'light');</script>
 </head>
 <body>
 
@@ -1013,7 +1041,13 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
     </span>
     <span class="live-dot"></span>
     <span class="live-txt">LIVE</span>
-    <span class="hdr-clock" id="hdr-clock"></span>
+    <div class="hdr-clocks" id="hdr-clocks">
+      <span class="clk"><span class="clk-city">Дубай</span><span class="clk-time" id="clk-dxb">—</span></span>
+      <span class="clk"><span class="clk-city">Лондон</span><span class="clk-time" id="clk-lon">—</span></span>
+      <span class="clk"><span class="clk-city">Ереван</span><span class="clk-time" id="clk-evn">—</span></span>
+      <span class="clk"><span class="clk-city">Москва</span><span class="clk-time" id="clk-msk">—</span></span>
+    </div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">тема</button>
   </div>
 </header>
 
@@ -1267,11 +1301,23 @@ body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacS
       txt.textContent=(dow===0||dow===6)?'США закрыто · выходной':'США закрыто';
     }}
   }}
-  setInterval(function(){{
-    el.textContent=new Date().toLocaleTimeString('ru-RU',{{timeZone:'Europe/Moscow',hour12:false}})+' МСК';
-  }},1000);
+  var _CLKS=[['clk-dxb','Asia/Dubai'],['clk-lon','Europe/London'],['clk-evn','Asia/Yerevan'],['clk-msk','Europe/Moscow']];
+  function updClocks(){{
+    var now=new Date();
+    _CLKS.forEach(function(c){{
+      var e=document.getElementById(c[0]);
+      if(e)e.textContent=now.toLocaleTimeString('ru-RU',{{timeZone:c[1],hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}});
+    }});
+  }}
+  updClocks();setInterval(updClocks,1000);
   updateSession();setInterval(updateSession,30000);
 }})();
+
+function toggleTheme(){{
+  var cur=document.documentElement.getAttribute('data-theme')||'light';
+  localStorage.setItem('bb-theme',cur==='light'?'dark':'light');
+  location.reload();
+}}
 
 // PRICE FORMATTER
 function fp(p,name){{
@@ -1477,18 +1523,20 @@ function sma(data,n){{
   return out;
 }}
 
+var _LIGHT=(document.documentElement.getAttribute('data-theme')||'light')==='light';
+var _CH={{bg:_LIGHT?'#ffffff':'#0c1624',txt:_LIGHT?'#9b9b98':'#4a6080',grid:_LIGHT?'#efefed':'#1a2840',cross:_LIGHT?'#111111':'#f59e0b'}};
 function initChart(){{
   var c=document.getElementById('chart-container');
   _chart=LightweightCharts.createChart(c,{{
-    layout:{{background:{{color:'#0c1624'}},textColor:'#4a6080'}},
-    grid:{{vertLines:{{color:'#1a2840'}},horzLines:{{color:'#1a2840'}}}},
+    layout:{{background:{{color:_CH.bg}},textColor:_CH.txt}},
+    grid:{{vertLines:{{color:_CH.grid}},horzLines:{{color:_CH.grid}}}},
     crosshair:{{
       mode:LightweightCharts.CrosshairMode.Normal,
-      vertLine:{{color:'#f59e0b',width:1,style:2}},
-      horzLine:{{color:'#f59e0b',width:1,style:2}}
+      vertLine:{{color:_CH.cross,width:1,style:2}},
+      horzLine:{{color:_CH.cross,width:1,style:2}}
     }},
-    rightPriceScale:{{borderColor:'#1a2840'}},
-    timeScale:{{borderColor:'#1a2840',timeVisible:true,secondsVisible:false}},
+    rightPriceScale:{{borderColor:_CH.grid}},
+    timeScale:{{borderColor:_CH.grid,timeVisible:true,secondsVisible:false}},
     width:c.clientWidth,
     height:Math.max(440,c.clientHeight||440),
   }});
@@ -1524,8 +1572,8 @@ function initMetals(){{
     var m=_metals[k],el=document.getElementById(k+'-chart');
     if(!el)return;
     m.chart=LightweightCharts.createChart(el,{{
-      layout:{{background:{{color:'transparent'}},textColor:'#4a6080',fontSize:9}},
-      grid:{{vertLines:{{visible:false}},horzLines:{{color:'rgba(74,96,128,.12)'}}}},
+      layout:{{background:{{color:'transparent'}},textColor:_CH.txt,fontSize:9}},
+      grid:{{vertLines:{{visible:false}},horzLines:{{color:_LIGHT?'rgba(0,0,0,.06)':'rgba(74,96,128,.12)'}}}},
       rightPriceScale:{{borderVisible:false}},
       timeScale:{{borderVisible:false,timeVisible:true,secondsVisible:false}},
       crosshair:{{mode:0}},handleScroll:false,handleScale:false
